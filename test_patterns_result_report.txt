@@ -1,0 +1,13 @@
+=== ОТЧЕТ О ТЕСТИРОВАНИИ ПАТТЕРНОВ ===
+Дата создания: 2025-09-08 23:51:30.495119
+Общее количество строк: 100000
+
+=== АНАЛИЗ ОСНОВНЫХ ПАТТЕРНОВ ===
+CDLDOJI: 80852 обнаружений, значения: [np.int32(0), np.int32(100)]
+CDLENGULFING: 1323 обнаружений, значения: [np.int32(-100), np.int32(-80), np.int32(0), np.int32(80), np.int32(100)]
+CDLHAMMER: 635 обнаружений, значения: [np.int32(0), np.int32(100)]
+CDLHANGINGMAN: 688 обнаружений, значения: [np.int32(-100), np.int32(0)]
+CDLMARUBOZU: 11649 обнаружений, значения: [np.int32(-100), np.int32(0), np.int32(100)]
+CDLSHOOTINGSTAR: 446 обнаружений, значения: [np.int32(-100), np.int32(0)]
+
+Отчет сохранен в: E:\MAX\PYTHON\NEURAL-BOTS\neirobot-trade-mat\test_patterns_result_report.txt
