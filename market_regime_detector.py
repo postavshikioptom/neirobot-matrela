@@ -2,6 +2,8 @@ import numpy as np
 import pandas as pd
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
+import pickle
+import os
 
 class MarketRegimeDetector:
     """
@@ -13,6 +15,8 @@ class MarketRegimeDetector:
         self.scaler = StandardScaler()
         self.kmeans = KMeans(n_clusters=4, random_state=42, n_init=10)  # n_init to avoid warning
         self.is_fitted = False
+        self.xlstm_model = None
+        self.xlstm_feature_columns = None
         
         # Названия режимов
         self.regime_names = {
@@ -21,6 +25,11 @@ class MarketRegimeDetector:
             2: 'SIDEWAYS_HIGH_VOL',
             3: 'SIDEWAYS_LOW_VOL'
         }
+
+    def set_xlstm_context(self, xlstm_model, xlstm_feature_columns):
+        self.xlstm_model = xlstm_model
+        self.xlstm_feature_columns = xlstm_feature_columns
+        print("✅ Детектор режимов получил контекст xLSTM")
     
     def extract_regime_features(self, df):
         """Извлекает признаки для определения режима рынка"""
@@ -46,6 +55,28 @@ class MarketRegimeDetector:
             'volatility', 'trend_strength', 'volume_trend', 'volume_volatility',
             'rsi_regime', 'bb_position', 'vsa_activity', 'vsa_direction'
         ]
+
+        # Добавляем xLSTM предсказания как фичи режима
+        if self.xlstm_model and self.xlstm_feature_columns and len(df) >= self.xlstm_model.input_shape[1]:
+            xlstm_preds = []
+            sequence_length = self.xlstm_model.input_shape[1]
+            for i in range(len(df) - sequence_length + 1):
+                sequence_data = df.iloc[i : i + sequence_length][self.xlstm_feature_columns].values
+                sequence_reshaped = sequence_data.reshape(1, sequence_length, len(self.xlstm_feature_columns))
+                xlstm_preds.append(self.xlstm_model.predict(sequence_reshaped)[0])
+            
+            # Заполняем NaN в начале, чтобы выровнять длину
+            df['xlstm_buy_pred'] = np.nan
+            df['xlstm_sell_pred'] = np.nan
+            df['xlstm_hold_pred'] = np.nan
+            
+            # Начинаем заполнять с индекса, где начинаются предсказания
+            start_idx = sequence_length - 1
+            df.loc[start_idx:, 'xlstm_buy_pred'] = [p[0] for p in xlstm_preds]
+            df.loc[start_idx:, 'xlstm_sell_pred'] = [p[1] for p in xlstm_preds]
+            df.loc[start_idx:, 'xlstm_hold_pred'] = [p[2] for p in xlstm_preds]
+
+            regime_features.extend(['xlstm_buy_pred', 'xlstm_sell_pred', 'xlstm_hold_pred'])
         
         return df.dropna(subset=regime_features)
     
@@ -57,10 +88,14 @@ class MarketRegimeDetector:
             raise ValueError("Недостаточно данных для обучения детектора режимов")
         
         # Нормализация и кластеризация
-        features_scaled = self.scaler.fit_transform(features_df[[
+        features_to_scale = [
             'volatility', 'trend_strength', 'volume_trend', 'volume_volatility',
             'rsi_regime', 'bb_position', 'vsa_activity', 'vsa_direction'
-        ]])
+        ]
+        if 'xlstm_buy_pred' in features_df.columns:
+            features_to_scale.extend(['xlstm_buy_pred', 'xlstm_sell_pred', 'xlstm_hold_pred'])
+
+        features_scaled = self.scaler.fit_transform(features_df[features_to_scale])
         self.kmeans.fit(features_scaled)
         self.is_fitted = True
         
@@ -101,10 +136,14 @@ class MarketRegimeDetector:
             return 'UNKNOWN', 0.0
         
         # Берем последние признаки
-        latest_features = features_df.iloc[-1:][[
+        features_to_predict = [
             'volatility', 'trend_strength', 'volume_trend', 'volume_volatility',
             'rsi_regime', 'bb_position', 'vsa_activity', 'vsa_direction'
-        ]].values
+        ]
+        if 'xlstm_buy_pred' in features_df.columns:
+            features_to_predict.extend(['xlstm_buy_pred', 'xlstm_sell_pred', 'xlstm_hold_pred'])
+        
+        latest_features = features_df.iloc[-1:][features_to_predict].values
         features_scaled = self.scaler.transform(latest_features)
         
         # Предсказываем режим
@@ -148,3 +187,27 @@ class MarketRegimeDetector:
         }
         
         return params.get(regime_name, params['SIDEWAYS_LOW_VOL'])
+
+    def save_detector(self, path='models/market_regime_detector.pkl'):
+        """Сохраняет обученный детектор режимов"""
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        detector_data = {
+            'scaler': self.scaler,
+            'kmeans': self.kmeans,
+            'is_fitted': self.is_fitted,
+            'lookback_period': self.lookback_period
+        }
+        with open(path, 'wb') as f:
+            pickle.dump(detector_data, f)
+        print(f"✅ Детектор режимов сохранен: {path}")
+    
+    def load_detector(self, path='models/market_regime_detector.pkl'):
+        """Загружает обученный детектор режимов"""
+        with open(path, 'rb') as f:
+            detector_data = pickle.load(f)
+        
+        self.scaler = detector_data['scaler']
+        self.kmeans = detector_data['kmeans']
+        self.is_fitted = detector_data['is_fitted']
+        self.lookback_period = detector_data['lookback_period']
+        print(f"✅ Детектор режимов загружен: {path}")

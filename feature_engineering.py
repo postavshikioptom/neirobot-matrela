@@ -390,7 +390,7 @@ def prepare_xlstm_rl_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     df = calculate_features(df)
     df = detect_candlestick_patterns(df)
-    df = calculate_advanced_vsa_features(df)  # Используем улучшенные VSA!
+    df = calculate_vsa_features(df)
     
     xlstm_rl_features = [
         # Технические индикаторы
@@ -399,11 +399,10 @@ def prepare_xlstm_rl_features(df: pd.DataFrame) -> pd.DataFrame:
         # Паттерны
         'CDLHAMMER', 'CDLENGULFING', 'CDLDOJI', 'CDLSHOOTINGSTAR',
         'CDLHANGINGMAN', 'CDLMARUBOZU',
-        # Улучшенные VSA сигналы
-        'vsa_strong_buy', 'vsa_strong_sell', 'vsa_momentum',
-        'vsa_stopping_volume_filtered', 'vsa_no_demand_filtered',
-        # Базовые VSA
-        'vsa_strength', 'volume_ratio', 'spread_ratio', 'close_position'
+        # VSA сигналы
+        'vsa_no_demand', 'vsa_no_supply', 'vsa_stopping_volume', 'vsa_climactic_volume', 'vsa_test', 'vsa_effort_vs_result', 'vsa_strength',
+        # Дополнительные рыночные данные
+        'volume_ratio', 'spread_ratio', 'close_position'
     ]
     
     return df, xlstm_rl_features

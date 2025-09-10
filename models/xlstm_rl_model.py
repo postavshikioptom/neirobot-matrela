@@ -10,7 +10,7 @@ from .xlstm_memory_cell import XLSTMLayer  # Импортируем настоя
 
 class XLSTMRLModel:
     """
-    Настоящая xLSTM модель с расширенной памятью
+    Настоящая xLSTM модель с расширенной памятью - ИСПРАВЛЕННАЯ ВЕРСИЯ
     """
     
     def __init__(self, input_shape, memory_units=128, memory_size=64, attention_units=64):
@@ -24,9 +24,10 @@ class XLSTMRLModel:
         
     def build_model(self):
         """
-        Строит настоящую xLSTM архитектуру с памятью
+        Строит настоящую xLSTM архитектуру с памятью - ИСПРАВЛЕННАЯ ВЕРСИЯ
         """
-        inputs = Input(shape=self.input_shape)
+        # ✅ Фиксируем входную форму для стабильности
+        inputs = Input(shape=self.input_shape, name='input_layer')
         
         # Первый xLSTM слой с внешней памятью
         xlstm1 = XLSTMLayer(
@@ -77,6 +78,7 @@ class XLSTMRLModel:
         print("✅ Настоящая xLSTM модель с памятью создана!")
         return self.model
     
+    # ... остальные методы остаются без изменений
     def train(self, X_train, y_train, X_val=None, y_val=None, epochs=50, batch_size=32):
         """
         Обучает модель

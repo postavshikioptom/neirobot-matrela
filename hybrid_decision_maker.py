@@ -9,8 +9,9 @@ class HybridDecisionMaker:
     Гибридный принимающий решения с адаптацией к рыночным режимам
     """
     
-    def __init__(self, xlstm_model_path, rl_agent_path, feature_columns):
-        self.xlstm_model = XLSTMRLModel(input_shape=(10, len(feature_columns)))
+    def __init__(self, xlstm_model_path, rl_agent_path, feature_columns, sequence_length):
+        self.sequence_length = sequence_length
+        self.xlstm_model = XLSTMRLModel(input_shape=(self.sequence_length, len(feature_columns)))
         self.xlstm_model.load_model(xlstm_model_path, xlstm_model_path.replace('.keras', '_scaler.pkl'))
         
         self.rl_agent = IntelligentRLAgent()
@@ -29,9 +30,10 @@ class HybridDecisionMaker:
         self.current_regime = 'UNKNOWN'
         self.regime_confidence = 0.0
         
-    def fit_regime_detector(self, historical_df):
+    def fit_regime_detector(self, historical_df, xlstm_model, xlstm_feature_columns):
         """Обучает детектор режимов на исторических данных"""
         try:
+            self.regime_detector.set_xlstm_context(xlstm_model, xlstm_feature_columns)
             self.regime_detector.fit(historical_df)
             print("✅ Детектор рыночных режимов обучен")
         except Exception as e:
@@ -41,7 +43,7 @@ class HybridDecisionMaker:
         """
         Принимает решение с адаптивным порогом
         """
-        if len(df_sequence) < 10:
+        if len(df_sequence) < self.sequence_length:
             return 'HOLD'
             
         try:
@@ -63,8 +65,8 @@ class HybridDecisionMaker:
                 print(f"📊 Финальный порог (адаптивный + режим): {final_threshold:.3f}")
             
             # === ШАГ 1: xLSTM АНАЛИЗ ===
-            sequence_data = df_sequence.tail(10)[self.feature_columns].values
-            sequence_reshaped = sequence_data.reshape(1, 10, len(self.feature_columns))
+            sequence_data = df_sequence.tail(self.sequence_length)[self.feature_columns].values
+            sequence_reshaped = sequence_data.reshape(1, self.sequence_length, len(self.feature_columns))
             
             xlstm_prediction = self.xlstm_model.predict(sequence_reshaped)[0]
             xlstm_decision_idx = np.argmax(xlstm_prediction)
@@ -255,7 +257,7 @@ class HybridDecisionMaker:
         """
         Вычисляет адаптивный порог уверенности на основе волатильности
         """
-        if len(df_sequence) < 10:
+        if len(df_sequence) < self.sequence_length:
             return 0.6
         
         # Вычисляем волатильность

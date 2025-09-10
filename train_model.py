@@ -10,6 +10,7 @@ from feature_engineering import calculate_features, detect_candlestick_patterns,
 from models.xlstm_rl_model import XLSTMRLModel
 from rl_agent import IntelligentRLAgent
 from trading_env import TradingEnvRL
+from hybrid_decision_maker import HybridDecisionMaker
 
 def prepare_xlstm_rl_data(data_path, sequence_length=10):
     """
@@ -136,6 +137,20 @@ def train_xlstm_rl_system(X, y, processed_dfs, feature_cols):
     
     # Сохраняем xLSTM модель
     xlstm_model.save_model()
+
+    # После обучения xlstm_model, обучите детектор режимов
+    # Возьмите достаточно большой исторический DataFrame для обучения детектора
+    # Например, объедините несколько символов или возьмите один большой
+    regime_training_df = pd.concat(list(processed_dfs.values())).reset_index(drop=True)
+    decision_maker_temp = HybridDecisionMaker(
+        xlstm_model_path='models/xlstm_rl_model.keras',
+        rl_agent_path='models/rl_agent_BTCUSDT', # Временно, он не будет использоваться для принятия решений
+        feature_columns=feature_cols,
+        sequence_length=X.shape[1] # Передаем sequence_length
+    )
+    decision_maker_temp.fit_regime_detector(regime_training_df, xlstm_model, feature_cols)
+    decision_maker_temp.regime_detector.save_detector('models/market_regime_detector.pkl')
+    print("✅ Детектор режимов сохранен")
     
     print("\n=== ЭТАП 2: ОБУЧЕНИЕ RL АГЕНТА ===")
     

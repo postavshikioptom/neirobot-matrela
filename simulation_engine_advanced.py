@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from feature_engineering import calculate_features, detect_candlestick_patterns, calculate_vsa_features
 from hybrid_decision_maker import HybridDecisionMaker
+import config
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -34,7 +35,8 @@ class AdvancedSimulationEngine:
             self.decision_maker = HybridDecisionMaker(
                 xlstm_model_path=xlstm_model_path,
                 rl_agent_path=rl_agent_path,
-                feature_columns=self.feature_columns
+                feature_columns=self.feature_columns,
+                sequence_length=config.SEQUENCE_LENGTH
             )
             print("✅ Гибридная система загружена для симуляции")
         except Exception as e:
@@ -129,9 +131,9 @@ class AdvancedSimulationEngine:
         confidence_threshold = params.get('confidence_threshold', 0.6)
         vsa_only = params.get('vsa_only', False)
         
-        for i in range(15, len(df)):  # Начинаем с 15-й свечи для истории
+        for i in range(config.SEQUENCE_LENGTH, len(df)):  # Начинаем с 15-й свечи для истории
             current_price = df.iloc[i]['close']
-            sequence_df = df.iloc[i-15:i+1]
+            sequence_df = df.iloc[i-config.SEQUENCE_LENGTH:i+1]
             
             # Получаем решение
             if vsa_only:

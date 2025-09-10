@@ -45,8 +45,8 @@ class XLSTMMemoryCell(Layer):
         memory_read = tf.matmul(memory_prev, self.W_mem)
         
         # Основные вычисления LSTM с памятью
-        i = tf.nn.sigmoid(tf.matmul(inputs, self.W_i) + tf.matmul(h_prev, self.U_i) + 
-                         tf.reduce_mean(memory_read, axis=0, keepdims=True) + self.b_i)
+        i = tf.nn.sigmoid(tf.matmul(inputs, self.W_i) + tf.matmul(h_prev, self.U_i) +
+                         memory_read + self.b_i)
         f = tf.nn.sigmoid(tf.matmul(inputs, self.W_f) + tf.matmul(h_prev, self.U_f) + self.b_f)
         c_tilde = tf.nn.tanh(tf.matmul(inputs, self.W_c) + tf.matmul(h_prev, self.U_c) + self.b_c)
         o = tf.nn.sigmoid(tf.matmul(inputs, self.W_o) + tf.matmul(h_prev, self.U_o) + self.b_o)
@@ -63,7 +63,7 @@ class XLSTMMemoryCell(Layer):
 
 class XLSTMLayer(Layer):
     """
-    Слой xLSTM с использованием кастомной ячейки памяти
+    Слой xLSTM с использованием кастомной ячейки памяти - ПОЛНОСТЬЮ ИСПРАВЛЕННАЯ ВЕРСИЯ
     """
     
     def __init__(self, units, memory_size=64, return_sequences=False, **kwargs):
@@ -73,6 +73,17 @@ class XLSTMLayer(Layer):
         self.return_sequences = return_sequences
         self.cell = XLSTMMemoryCell(units, memory_size)
         
+    def build(self, input_shape):
+        # Строим ячейку
+        self.cell.build(input_shape)
+        super(XLSTMLayer, self).build(input_shape)
+        
+    def compute_output_shape(self, input_shape):
+        if self.return_sequences:
+            return (input_shape[0], input_shape[1], self.units)
+        else:
+            return (input_shape[0], self.units)
+    
     def call(self, inputs):
         batch_size = tf.shape(inputs)[0]
         seq_len = tf.shape(inputs)[1]
@@ -83,14 +94,44 @@ class XLSTMLayer(Layer):
         memory = tf.zeros((batch_size, self.memory_size))
         
         states = [h, c, memory]
-        outputs = []
         
-        # Проходим по временным шагам
-        for t in range(seq_len):
-            output, states = self.cell(inputs[:, t, :], states)
-            outputs.append(output)
-            
         if self.return_sequences:
-            return tf.stack(outputs, axis=1)
+            # ✅ СЛУЧАЙ 1: Возвращаем все выходы
+            outputs = tf.TensorArray(dtype=tf.float32, size=seq_len)
+            
+            def step_fn(t, states, outputs_ta):
+                current_input = inputs[:, t, :]
+                output, new_states = self.cell(current_input, states)
+                outputs_ta = outputs_ta.write(t, output)
+                return t + 1, new_states, outputs_ta
+            
+            def condition(t, states, outputs_ta):
+                return t < seq_len
+            
+            _, final_states, outputs = tf.while_loop(
+                condition, step_fn, 
+                [0, states, outputs],
+                parallel_iterations=1
+            )
+            
+            # Собираем все выходы
+            outputs = outputs.stack()  # (seq_len, batch_size, units)
+            outputs = tf.transpose(outputs, [1, 0, 2])  # (batch_size, seq_len, units)
+            return outputs
         else:
-            return outputs[-1]
+            # ✅ СЛУЧАЙ 2: Возвращаем только последний выход - ИСПРАВЛЕНО
+            def step_fn_last(t, states, last_output):
+                current_input = inputs[:, t, :]
+                output, new_states = self.cell(current_input, states)
+                return t + 1, new_states, output
+            
+            def condition_last(t, states, last_output):  # ✅ Отдельное условие!
+                return t < seq_len
+            
+            _, _, last_output = tf.while_loop(
+                condition_last, step_fn_last,  # ✅ Правильное условие
+                [0, states, tf.zeros((batch_size, self.units))],
+                parallel_iterations=1
+            )
+            
+            return last_output

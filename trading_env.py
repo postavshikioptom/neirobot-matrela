@@ -115,7 +115,8 @@ class TradingEnvRL(gym.Env):
             if self.position == 1:  # Закрываем long
                 pnl = self.unrealized_pnl - (self.commission * 2)
                 vsa_features = self._get_vsa_features()
-                reward = self._calculate_advanced_reward(action, pnl * 100, vsa_features)
+                xlstm_pred_for_reward = self._get_xlstm_prediction()
+                reward = self._calculate_advanced_reward(action, pnl * 100, vsa_features, xlstm_pred_for_reward)
                 self.balance *= (1 + pnl)
                 self.position = 0
                 self.steps_in_position = 0
@@ -129,7 +130,8 @@ class TradingEnvRL(gym.Env):
             if self.position == -1:  # Закрываем short
                 pnl = self.unrealized_pnl - (self.commission * 2)
                 vsa_features = self._get_vsa_features()
-                reward = self._calculate_advanced_reward(action, pnl * 100, vsa_features)
+                xlstm_pred_for_reward = self._get_xlstm_prediction()
+                reward = self._calculate_advanced_reward(action, pnl * 100, vsa_features, xlstm_pred_for_reward)
                 self.balance *= (1 + pnl)
                 self.position = 0
                 self.steps_in_position = 0
@@ -153,7 +155,7 @@ class TradingEnvRL(gym.Env):
         done = self.current_step >= len(self.df) - 1
         
         return self._get_observation(), reward, done, False, {}
-    def _calculate_advanced_reward(self, action, pnl_pct, vsa_features):
+    def _calculate_advanced_reward(self, action, pnl_pct, vsa_features, xlstm_prediction):
         """
         Расширенная система наград с учетом качества сигналов
         """
@@ -161,31 +163,45 @@ class TradingEnvRL(gym.Env):
         
         # Бонусы за качественные VSA сигналы
         vsa_bonus = 0
-        if action in [0, 1]:  # BUY или SELL
-            if action == 1:  # BUY
-                if vsa_features[1] > 0 or vsa_features[2] > 0:  # no_supply или stopping_volume
-                    vsa_bonus = 3
-            else:  # SELL
-                if vsa_features[0] > 0 or vsa_features[3] > 0:  # no_demand или climactic_volume
-                    vsa_bonus = 3
-        
+        if action in [0, 1]:
+            if action == 1 and (vsa_features[1] > 0 or vsa_features[2] > 0):
+                vsa_bonus = 3
+            elif action == 0 and (vsa_features[0] > 0 or vsa_features[3] > 0):
+                vsa_bonus = 3
+
         # Штраф за противоречащие VSA сигналы
         vsa_penalty = 0
-        if action == 1 and (vsa_features[0] > 0 or vsa_features[3] > 0):  # BUY при медвежьих VSA
+        if action == 1 and (vsa_features[0] > 0 or vsa_features[3] > 0):
             vsa_penalty = -5
-        elif action == 0 and (vsa_features[1] > 0 or vsa_features[2] > 0):  # SELL при бычьих VSA
+        elif action == 0 and (vsa_features[1] > 0 or vsa_features[2] > 0):
             vsa_penalty = -5
-        
+
         # Бонус за скорость закрытия прибыльных позиций
         speed_bonus = 0
         if pnl_pct > 0 and self.steps_in_position < 20:
             speed_bonus = 2
-        
+
         # Штраф за долгое удержание убыточных позиций
         hold_penalty = 0
         if pnl_pct < 0 and self.steps_in_position > 30:
             hold_penalty = -3
+
+        # Бонус за уверенность xLSTM
+        xlstm_conf = np.max(xlstm_prediction)
+        if xlstm_conf > 0.7:
+            base_reward += xlstm_conf * 2
+
+        # Штраф за противоречие xLSTM
+        predicted_action_idx = np.argmax(xlstm_prediction)
+        xlstm_to_rl_map = {0: 1, 1: 0, 2: 2}  # xLSTM_BUY->RL_BUY, xLSTM_SELL->RL_SELL
         
+        if action != 2 and action != xlstm_to_rl_map.get(predicted_action_idx):
+            base_reward -= 1
+
+        # Штраф за отклонение от баланса (риск-менеджмент)
+        if self.balance < self.initial_balance * 0.9:
+            base_reward -= 5
+
         total_reward = base_reward + vsa_bonus + vsa_penalty + speed_bonus + hold_penalty
         
         return total_reward

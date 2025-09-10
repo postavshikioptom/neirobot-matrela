@@ -29,7 +29,7 @@ OPEN_TRADE_LIMIT = 1000
 TAKE_PROFIT_PCT = 1.5  # Увеличили TP
 STOP_LOSS_PCT = -1.0   # Уменьшили SL
 CONFIDENCE_THRESHOLD = 0.65  # Повысили порог уверенности
-SEQUENCE_LENGTH = 10
+#SEQUENCE_LENGTH = 10
 
 # === НОВЫЕ КОЛОНКИ ПРИЗНАКОВ С VSA ===
 FEATURE_COLUMNS = [
@@ -47,6 +47,9 @@ FEATURE_COLUMNS = [
 ]
 
 opened_trades_counter = 0
+
+performance_monitor = None
+notification_system = None
 
 # Настройка логирования
 logging.basicConfig(
@@ -75,11 +78,12 @@ def error_handler(func):
 def manage_active_positions(session, decision_maker):
     """Управление активными позициями с новой логикой"""
     active_positions = load_active_positions()
-    if not active_positions: 
+    if not active_positions:
         return
 
     print(f"Открыто сделок: {opened_trades_counter}/{OPEN_TRADE_LIMIT}. Активных позиций: {len(active_positions)}")
     
+    kline_cache = {}
     symbols_to_remove = []
     positions_items = list(active_positions.items())
     displayed_positions = positions_items[:5]
@@ -90,20 +94,20 @@ def manage_active_positions(session, decision_maker):
 
     for i, (symbol, pos) in enumerate(positions_items):
         try:
-            # Получаем свежие данные
-            kline_list = trade_manager.fetch_initial_data(session, symbol)
-            if not kline_list: 
-                continue
+            if symbol not in kline_cache:
+                kline_list = trade_manager.fetch_initial_data(session, symbol)
+                if not kline_list:
+                    continue
+                kline_cache[symbol] = pd.DataFrame(kline_list, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
             
-            # Подготавливаем DataFrame с VSA
-            kline_df = pd.DataFrame(kline_list, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
+            kline_df = kline_cache[symbol].copy()
             
             # === НОВАЯ ОБРАБОТКА С VSA ===
             features_df = feature_engineering.calculate_features(kline_df.copy())
             features_df = feature_engineering.detect_candlestick_patterns(features_df)
             features_df = feature_engineering.calculate_vsa_features(features_df)  # Добавляем VSA!
             
-            if features_df.empty or len(features_df) < SEQUENCE_LENGTH: 
+            if features_df.empty or len(features_df) < config.SEQUENCE_LENGTH:
                 continue
 
             # Принимаем решение через новую гибридную систему
@@ -227,7 +231,7 @@ def process_new_signal(session, symbol, decision_maker):
         features_df = feature_engineering.detect_candlestick_patterns(features_df)
         features_df = feature_engineering.calculate_vsa_features(features_df)
         
-        if features_df.empty or len(features_df) < SEQUENCE_LENGTH: 
+        if features_df.empty or len(features_df) < config.SEQUENCE_LENGTH:
             return
 
         # Принимаем решение через гибридную систему
@@ -364,6 +368,7 @@ def log_enhanced_trade(symbol, action, trade_result, position, pnl, decision_mak
 
 def run_trading_loop():
     """Главный торговый цикл с новой архитектурой"""
+    global performance_monitor, notification_system
     print("=== ЗАПУСК НОВОГО ТРЕЙДИНГ-БОТА: xLSTM + VSA + RL ===")
     
     performance_monitor = PerformanceMonitor()
@@ -383,9 +388,16 @@ def run_trading_loop():
         decision_maker = HybridDecisionMaker(
             xlstm_model_path='models/xlstm_rl_model.keras',
             rl_agent_path='models/rl_agent_BTCUSDT',  # Используем лучшего агента
-            feature_columns=FEATURE_COLUMNS
+            feature_columns=FEATURE_COLUMNS,
+            sequence_length=config.SEQUENCE_LENGTH
         )
         print("✅ Гибридная система xLSTM + VSA + RL успешно загружена!")
+        
+        try:
+            decision_maker.regime_detector.load_detector('models/market_regime_detector.pkl')
+            print("✅ Детектор режимов загружен")
+        except:
+            print("⚠️ Детектор режимов не найден, будет обучен заново")
         
     except Exception as e:
         print(f"❌ КРИТИЧЕСКАЯ ОШИБКА: Не удалось загрузить гибридную систему: {e}")
