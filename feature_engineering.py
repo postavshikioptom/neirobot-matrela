@@ -1,9 +1,18 @@
 import pandas as pd
 import talib
+from functools import lru_cache
 
 import numpy as np
 
 # --- Helper functions for pattern features from info-4-patterns.md ---
+
+@lru_cache(maxsize=128)
+def cached_calculate_atr(high_tuple, low_tuple, close_tuple, period=14):
+    """Кэшированная версия расчета ATR"""
+    high = np.array(high_tuple)
+    low = np.array(low_tuple)
+    close = np.array(close_tuple)
+    return talib.ATR(high, low, close, timeperiod=period)
 
 def calculate_atr(high, low, close, period=14):
     return talib.ATR(high, low, close, timeperiod=period)
@@ -303,6 +312,102 @@ def prepare_features_for_models(df: pd.DataFrame) -> dict:
         'price_series': price_series
     }
 
+# === VSA ANALYSIS MODULE ===
+def calculate_vsa_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Добавляет VSA (Volume Spread Analysis) признаки для анализа умных денег
+    """
+    df = df.copy()
+    
+    # Базовые VSA компоненты
+    df['spread'] = df['high'] - df['low']
+    df['body'] = abs(df['close'] - df['open'])
+    df['close_position'] = (df['close'] - df['low']) / df['spread']  # 0=bottom, 1=top
+    df['volume_ratio'] = df['volume'] / df['volume'].rolling(20).mean()
+    df['spread_ratio'] = df['spread'] / df['spread'].rolling(20).mean()
+    
+    # VSA сигналы для обнаружения умных денег
+    
+    # 1. No Demand (слабость покупателей)
+    df['vsa_no_demand'] = (
+        (df['volume_ratio'] < 0.7) &  # низкий объем
+        (df['spread_ratio'] < 0.8) &  # узкий спред
+        (df['close'] < df['open']) &   # красная свеча
+        (df['close_position'] < 0.4)  # закрытие внизу
+    ).astype(int)
+    
+    # 2. No Supply (слабость продавцов)
+    df['vsa_no_supply'] = (
+        (df['volume_ratio'] < 0.7) &  # низкий объем
+        (df['spread_ratio'] < 0.8) &  # узкий спред
+        (df['close'] > df['open']) &   # зеленая свеча
+        (df['close_position'] > 0.6)  # закрытие вверху
+    ).astype(int)
+    
+    # 3. Stopping Volume (остановочный объем - разворот)
+    df['vsa_stopping_volume'] = (
+        (df['volume_ratio'] > 2.0) &  # очень высокий объем
+        (df['spread_ratio'] > 1.2) &  # широкий спред
+        (df['close_position'] > 0.7)  # закрытие вверху после падения
+    ).astype(int)
+    
+    # 4. Climactic Volume (кульминационный объем)
+    df['vsa_climactic_volume'] = (
+        (df['volume_ratio'] > 3.0) &  # экстремальный объем
+        (df['spread_ratio'] > 1.5) &  # очень широкий спред
+        (df['close_position'] < 0.3)  # закрытие внизу
+    ).astype(int)
+    
+    # 5. Test (тест - проверка силы/слабости)
+    df['vsa_test'] = (
+        (df['volume_ratio'] < 0.5) &  # очень низкий объем
+        (df['spread_ratio'] < 0.6) &  # узкий спред
+        (abs(df['close'] - df['open']) / df['spread'] < 0.3)  # маленькое тело
+    ).astype(int)
+    
+    # 6. Effort vs Result (усилие против результата)
+    df['vsa_effort_vs_result'] = (
+        (df['volume_ratio'] > 1.8) &  # высокий объем (усилие)
+        (df['spread_ratio'] < 0.7) &  # но маленький спред (плохой результат)
+        (abs(df['body']) / df['spread'] < 0.4)  # маленькое тело
+    ).astype(int)
+    
+    # Сводный VSA индекс силы/слабости
+    df['vsa_strength'] = (
+        df['vsa_no_supply'] * 1 +
+        df['vsa_stopping_volume'] * 2 +
+        df['vsa_test'] * 0.5 -
+        df['vsa_no_demand'] * 1 -
+        df['vsa_climactic_volume'] * 2 -
+        df['vsa_effort_vs_result'] * 1
+    )
+    
+    return df
+
+def prepare_xlstm_rl_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Подготавливает улучшенные признаки для единой xLSTM+RL модели
+    """
+    df = calculate_features(df)
+    df = detect_candlestick_patterns(df)
+    df = calculate_advanced_vsa_features(df)  # Используем улучшенные VSA!
+    
+    xlstm_rl_features = [
+        # Технические индикаторы
+        'RSI_14', 'MACD_12_26_9', 'BBL_20_2.0', 'BBM_20_2.0', 'BBU_20_2.0',
+        'ADX_14', 'STOCHk_14_3_3', 'STOCHd_14_3_3',
+        # Паттерны
+        'CDLHAMMER', 'CDLENGULFING', 'CDLDOJI', 'CDLSHOOTINGSTAR',
+        'CDLHANGINGMAN', 'CDLMARUBOZU',
+        # Улучшенные VSA сигналы
+        'vsa_strong_buy', 'vsa_strong_sell', 'vsa_momentum',
+        'vsa_stopping_volume_filtered', 'vsa_no_demand_filtered',
+        # Базовые VSA
+        'vsa_strength', 'volume_ratio', 'spread_ratio', 'close_position'
+    ]
+    
+    return df, xlstm_rl_features
+
 if __name__ == '__main__':
     # --- Example Usage and Testing ---
     print("Testing feature engineering module...")
@@ -335,3 +440,36 @@ if __name__ == '__main__':
         print("ERROR: Test file 'historical_data.csv' not found.")
     except Exception as e:
         print(f"An error occurred during testing: {e}")
+
+def calculate_advanced_vsa_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Расширенные VSA признаки для лучшего качества сигналов
+    """
+    df = calculate_vsa_features(df)  # Базовые VSA
+    
+    # Добавляем временные фильтры VSA
+    df['vsa_no_demand_filtered'] = (
+        (df['vsa_no_demand'] == 1) & 
+        (df['vsa_no_demand'].rolling(3).sum() <= 1)  # Не более 1 раза за 3 свечи
+    ).astype(int)
+    
+    df['vsa_stopping_volume_filtered'] = (
+        (df['vsa_stopping_volume'] == 1) &
+        (df['close'].pct_change() < -0.02)  # Только после падения >2%
+    ).astype(int)
+    
+    # Комбинированные VSA сигналы
+    df['vsa_strong_buy'] = (
+        (df['vsa_no_supply'] == 1) | 
+        (df['vsa_stopping_volume_filtered'] == 1)
+    ).astype(int)
+    
+    df['vsa_strong_sell'] = (
+        (df['vsa_no_demand_filtered'] == 1) | 
+        (df['vsa_climactic_volume'] == 1)
+    ).astype(int)
+    
+    # VSA momentum
+    df['vsa_momentum'] = df['vsa_strength'].rolling(5).mean()
+    
+    return df

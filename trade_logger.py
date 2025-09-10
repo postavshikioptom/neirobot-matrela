@@ -51,3 +51,75 @@ def log_trade(log_data):
 
     except Exception as e:
         print(f"!!! ОШИБКА ЗАПИСИ ЛОГА: {e} !!!")
+def log_enhanced_trade_with_quality_metrics(log_data):
+    """
+    Расширенное логирование с метриками качества сигналов
+    """
+    # Вычисляем метрики качества сигнала
+    signal_quality = calculate_signal_quality(log_data)
+    log_data.update(signal_quality)
+    
+    # Стандартное логирование
+    log_trade(log_data)
+    
+    # Дополнительная аналитика
+    update_signal_quality_stats(signal_quality)
+
+def calculate_signal_quality(log_data):
+    """
+    Вычисляет метрики качества торгового сигнала
+    """
+    quality_metrics = {}
+    
+    # VSA качество (0-100)
+    vsa_signals_count = sum([
+        log_data.get('vsa_no_demand', 0),
+        log_data.get('vsa_no_supply', 0),
+        log_data.get('vsa_stopping_volume', 0),
+        log_data.get('vsa_climactic_volume', 0)
+    ])
+    vsa_strength = abs(log_data.get('vsa_strength', 0))
+    quality_metrics['vsa_quality'] = min(100, (vsa_signals_count * 25) + (vsa_strength * 10))
+    
+    # xLSTM уверенность качество
+    xlstm_confidence = log_data.get('xlstm_confidence', 0)
+    quality_metrics['xlstm_quality'] = xlstm_confidence * 100
+    
+    # Согласованность моделей
+    xlstm_decision = log_data.get('final_decision', 'HOLD')
+    rl_decision = log_data.get('rl_decision', 'HOLD')
+    quality_metrics['model_consensus'] = 100 if xlstm_decision == rl_decision else 50
+    
+    # Общее качество сигнала
+    quality_metrics['overall_signal_quality'] = (
+        quality_metrics['vsa_quality'] * 0.4 +
+        quality_metrics['xlstm_quality'] * 0.4 +
+        quality_metrics['model_consensus'] * 0.2
+    )
+    
+    return quality_metrics
+
+def update_signal_quality_stats(quality_metrics):
+    """
+    Обновляет статистику качества сигналов
+    """
+    stats_file = 'signal_quality_stats.json'
+    
+    try:
+        with open(stats_file, 'r') as f:
+            stats = json.load(f)
+    except:
+        stats = {'total_signals': 0, 'quality_sum': 0, 'quality_history': []}
+    
+    stats['total_signals'] += 1
+    stats['quality_sum'] += quality_metrics['overall_signal_quality']
+    stats['quality_history'].append(quality_metrics['overall_signal_quality'])
+    
+    # Сохраняем только последние 1000 сигналов
+    if len(stats['quality_history']) > 1000:
+        stats['quality_history'] = stats['quality_history'][-1000:]
+        
+    stats['average_quality'] = stats['quality_sum'] / stats['total_signals']
+    
+    with open(stats_file, 'w') as f:
+        json.dump(stats, f, indent=2)

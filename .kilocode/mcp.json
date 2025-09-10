@@ -1,14 +1,17 @@
 {
   "mcpServers": {
-    "context7": {
-      "command": "npx",
+    "context7-mcp": {
+      "command": "cmd",
       "args": [
+        "/c",
+        "npx",
         "-y",
-        "@upstash/context7-mcp"
-      ],
-      "env": {
-        "DEFAULT_MINIMUM_TOKENS": ""
-      }
+        "@smithery/cli@latest",
+        "run",
+        "@upstash/context7-mcp",
+        "--key",
+        "fb937fdf-94b4-4e29-9315-d32fa5a77ff5"
+      ]
     },
     "sequentialthinking": {
       "command": "npx",
@@ -34,8 +37,8 @@
         "tavily_search"
       ]
     },
-    "neirobot-trade-mat Docs": {
-      "url": "https://gitmcp.io/postavshikioptom/neirobot-trade-mat",
+    "neirobot-matrela Docs": {
+      "url": "https://gitmcp.io/postavshikioptom/neirobot-matrela",
       "disabled": false,
       "autoApprove": []
     },

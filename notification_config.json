@@ -1,0 +1,19 @@
+{
+  "telegram": {
+    "enabled": true,
+    "bot_token": "YOUR_BOT_TOKEN",
+    "chat_id": "YOUR_CHAT_ID"
+  },
+  "email": {
+    "enabled": false,
+    "smtp_server": "smtp.gmail.com",
+    "smtp_port": 587,
+    "email": "your_email@gmail.com",
+    "password": "your_password",
+    "to_email": "alerts@yourdomain.com"
+  },
+  "webhook": {
+    "enabled": false,
+    "url": "https://your-webhook-url.com/alerts"
+  }
+}
