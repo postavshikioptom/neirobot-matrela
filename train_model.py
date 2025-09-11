@@ -2,8 +2,37 @@ import pandas as pd
 import numpy as np
 import argparse
 import os
+import gc
+import pickle  # ДОБАВЬТЕ эту строку
 from sklearn.model_selection import train_test_split
 from tensorflow.keras.utils import to_categorical
+
+import tensorflow as tf
+
+def configure_gpu_memory():
+    """Настройка GPU для стабильной работы"""
+    gpus = tf.config.experimental.list_physical_devices('GPU')
+    if gpus:
+        try:
+            # Включаем рост памяти + ограничиваем максимум
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+                # Ограничиваем память до 80% от доступной
+                tf.config.experimental.set_virtual_device_configuration(
+                    gpu,
+                    [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=1024*10)]  # 10GB max
+                )
+            print(f"✅ GPU память настроена для {len(gpus)} устройств")
+        except RuntimeError as e:
+            print(f"⚠️ Ошибка настройки GPU: {e}")
+    else:
+        print("⚠️ GPU не найден, будет использоваться CPU")
+
+configure_gpu_memory()
+
+# ✅ НАСТРОЙКИ ДЛЯ СОВМЕСТИМОСТИ С РАЗНЫМИ СРЕДАМИ
+# Отключаем XLA если возникают проблемы (можно включить обратно)
+# os.environ['TF_XLA_FLAGS'] = '--tf_xla_enable_xla_devices=false'
 
 # Новые импорты
 from feature_engineering import calculate_features, detect_candlestick_patterns, calculate_vsa_features
@@ -100,6 +129,13 @@ def prepare_xlstm_rl_data(data_path, sequence_length=10):
     X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
     y = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
     
+    # ДОБАВЬТЕ: Проверка баланса классов
+    print(f"Баланс классов:")
+    unique, counts = np.unique(np.argmax(y, axis=1), return_counts=True)
+    class_names = ['BUY', 'SELL', 'HOLD']
+    for class_idx, count in zip(unique, counts):
+        print(f"  {class_names[class_idx]}: {count} ({count/len(y)*100:.1f}%)")
+    
     return X, y, processed_dfs, feature_cols
 
 def train_xlstm_rl_system(X, y, processed_dfs, feature_cols):
@@ -108,32 +144,129 @@ def train_xlstm_rl_system(X, y, processed_dfs, feature_cols):
     """
     print("\n=== ЭТАП 1: ОБУЧЕНИЕ xLSTM МОДЕЛИ ===")
     
+    # ДОБАВЬТЕ: Создание директории для моделей
+    os.makedirs('models', exist_ok=True)
+    
     # Разделяем данные
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.2, random_state=42)
+    
+    # ДОБАВЬТЕ: Принудительная очистка памяти
+    gc.collect()
+    tf.keras.backend.clear_session()
     
     print(f"Обучающая выборка: {len(X_train)}")
     print(f"Валидационная выборка: {len(X_val)}")
     print(f"Тестовая выборка: {len(X_test)}")
     
-    # Создаем и обучаем xLSTM модель
-    xlstm_model = XLSTMRLModel(
-        input_shape=(X_train.shape[1], X_train.shape[2]),
-        memory_units=128,
-        attention_units=64
-    )
+    # В функции train_xlstm_rl_system(), после создания xlstm_model добавьте:
+    print(f"Форма данных для обучения: X_train={X_train.shape}, y_train={y_train.shape}")
+    print(f"Количество признаков: {len(feature_cols)}")
+
+    # Проверяем наличие NaN/Inf в данных перед обучением
+    if np.any(np.isnan(X_train)) or np.any(np.isinf(X_train)):
+        print("⚠️ Обнаружены NaN/Inf в тренировочных данных!")
+        X_train = np.nan_to_num(X_train, nan=0.0, posinf=0.0, neginf=0.0)
+        X_val = np.nan_to_num(X_val, nan=0.0, posinf=0.0, neginf=0.0)
+        X_test = np.nan_to_num(X_test, nan=0.0, posinf=0.0, neginf=0.0)
+        print("✅ NaN/Inf исправлены")
+        
+    # Проверяем, есть ли сохраненная модель
+    checkpoint_path = 'models/xlstm_checkpoint_latest.keras'
+    scaler_path = 'models/xlstm_rl_scaler.pkl'
+
+    if os.path.exists(checkpoint_path):
+        print("Найдена сохраненная модель, загружаем...")
+        try:
+            xlstm_model = XLSTMRLModel(
+                input_shape=(X_train.shape[1], X_train.shape[2]),
+                memory_units=128,
+                attention_units=64
+            )
+            # ИСПРАВЛЕНО: Загружаем модель и scaler
+            xlstm_model.model = tf.keras.models.load_model(checkpoint_path)
+            
+            # Загружаем scaler если он существует
+            if os.path.exists(scaler_path):
+                with open(scaler_path, 'rb') as f:
+                    xlstm_model.scaler = pickle.load(f)
+                xlstm_model.is_trained = True
+                print("✅ Модель и scaler загружены, продолжаем обучение")
+            else:
+                print("⚠️ Scaler не найден, будет создан новый")
+                
+        except Exception as e:
+            print(f"⚠️ Не удалось загрузить модель: {e}, начинаем заново")
+            xlstm_model = XLSTMRLModel(
+                input_shape=(X_train.shape[1], X_train.shape[2]),
+                memory_units=128,
+                attention_units=64
+            )
+    else:
+        xlstm_model = XLSTMRLModel(
+            input_shape=(X_train.shape[1], X_train.shape[2]),
+            memory_units=128,
+            attention_units=64
+        )
+
+    # ДОБАВЬТЕ: Кастомные колбэки для мониторинга и очистки памяти
+    class MemoryCleanupCallback(tf.keras.callbacks.Callback):
+        def on_epoch_end(self, epoch, logs=None):
+            if epoch % 10 == 0:  # Каждые 10 эпох
+                gc.collect()
+                # ИСПРАВЛЕНО: НЕ очищаем сессию во время обучения
+                # tf.keras.backend.clear_session()  # Это может сломать обучение!
+                print(f"Эпоха {epoch}: Память очищена")
     
-    # Обучение с ранним остановом
+    class DetailedProgressCallback(tf.keras.callbacks.Callback):
+        def on_epoch_end(self, epoch, logs=None):
+            try:
+                # Добавляем больше метрик для мониторинга
+                lr = self.model.optimizer.learning_rate.numpy()
+                print(f"Эпоха {epoch+1}/100 - loss: {logs['loss']:.4f} - val_loss: {logs['val_loss']:.4f} - lr: {lr:.2e}")
+                
+                # Проверяем на переобучение
+                if logs['val_loss'] > logs['loss'] * 2:
+                    print("⚠️ Возможное переобучение!")
+            except Exception as e:
+                # Fallback если не удается получить learning rate
+                print(f"Эпоха {epoch+1}/100 - loss: {logs['loss']:.4f} - val_loss: {logs['val_loss']:.4f}")
+            
+    # Обучение с улучшенными колбэками
     history = xlstm_model.train(
         X_train, y_train,
         X_val, y_val,
         epochs=100,
-        batch_size=32
+        batch_size=16,  # УМЕНЬШИЛИ batch_size для стабильности
+        custom_callbacks=[
+            MemoryCleanupCallback(),
+            DetailedProgressCallback(),
+            tf.keras.callbacks.ReduceLROnPlateau(
+                monitor='val_loss',
+                factor=0.5,
+                patience=15,
+                min_lr=1e-7,
+                verbose=1
+            )
+        ]
     )
+
+    # После завершения обучения xLSTM, добавьте:
+    print(f"\n📊 Статистика обучения xLSTM:")
+    print(f"Финальная loss: {history.history['loss'][-1]:.4f}")
+    print(f"Финальная val_loss: {history.history['val_loss'][-1]:.4f}")
+    print(f"Лучшая val_loss: {min(history.history['val_loss']):.4f}")
+    print(f"Количество эпох: {len(history.history['loss'])}")
     
     # Оценка xLSTM
-    loss, accuracy, precision, recall = xlstm_model.model.evaluate(X_test, y_test, verbose=0)
-    print(f"xLSTM Точность: {accuracy * 100:.2f}%")
+    try:
+        X_test_scaled = xlstm_model.scaler.transform(X_test.reshape(-1, X_test.shape[-1])).reshape(X_test.shape)
+        loss, accuracy, precision, recall = xlstm_model.model.evaluate(X_test_scaled, y_test, verbose=0)
+        print(f"xLSTM Точность: {accuracy * 100:.2f}%")
+        print(f"xLSTM Precision: {precision * 100:.2f}%")
+        print(f"xLSTM Recall: {recall * 100:.2f}%")
+    except Exception as e:
+        print(f"⚠️ Ошибка при оценке модели: {e}")
     
     # Сохраняем xLSTM модель
     xlstm_model.save_model()
@@ -154,37 +287,78 @@ def train_xlstm_rl_system(X, y, processed_dfs, feature_cols):
     
     print("\n=== ЭТАП 2: ОБУЧЕНИЕ RL АГЕНТА ===")
     
-    # Выбираем данные для RL обучения (используем несколько символов)
-    rl_symbols = list(processed_dfs.keys())[:3]  # Берем первые 3 символа
+    # ДОБАВЬТЕ: Ограничиваем количество символов для стабильности
+    rl_symbols = list(processed_dfs.keys())[:2]  # Только 2 символа вместо 3
     
-    rl_agent = None # Initialize rl_agent
+    rl_agent = None
     for i, symbol in enumerate(rl_symbols):
         df = processed_dfs[symbol]
         print(f"\nОбучение RL на символе {symbol} ({i+1}/{len(rl_symbols)})")
         
-        # Разделяем на train/eval для RL
+        # ДОБАВЬТЕ: Очистка памяти перед каждым RL агентом
+        gc.collect()
+        
+        # Разделяем данные
         split_idx = int(len(df) * 0.8)
         train_df = df.iloc[:split_idx].copy()
         eval_df = df.iloc[split_idx:].copy()
         
+        if len(train_df) < 100 or len(eval_df) < 50:
+            print(f"⚠️ Недостаточно данных для {symbol}, пропускаем")
+            continue
+            
         # Создаем RL агента
         rl_agent = IntelligentRLAgent(algorithm='PPO')
         
-        # Создаем среды
-        vec_env = rl_agent.create_training_environment(train_df, xlstm_model)
-        rl_agent.create_evaluation_environment(eval_df, xlstm_model)
-        
-        # Строим и обучаем агента
-        rl_agent.build_agent(vec_env)
-        rl_agent.train_with_callbacks(
-            total_timesteps=50000,
-            eval_freq=2000
-        )
-        
-        # Сохраняем лучшего агента
-        rl_agent.save_agent(f'models/rl_agent_{symbol}')
+        try:
+            # Создаем среды
+            vec_env = rl_agent.create_training_environment(train_df, xlstm_model)
+            rl_agent.create_evaluation_environment(eval_df, xlstm_model)
+            
+            # Строим и обучаем агента
+            rl_agent.build_agent(vec_env)
+            
+            # ДОБАВЬТЕ: Обучение меньшими порциями с сохранениями
+            for step in range(0, 50000, 10000):  # По 10k шагов
+                print(f"RL обучение: шаги {step}-{min(step+10000, 50000)}")
+                rl_agent.train_with_callbacks(
+                    total_timesteps=10000,
+                    eval_freq=2000
+                )
+                # Сохраняем промежуточные результаты
+                rl_agent.save_agent(f'models/rl_agent_{symbol}_step_{step}')
+                gc.collect()  # Очищаем память
+            
+            # Финальное сохранение
+            rl_agent.save_agent(f'models/rl_agent_{symbol}')
+            
+        except Exception as e:
+            print(f"⚠️ Ошибка при обучении RL для {symbol}: {e}")
+            continue
     
     print("\n=== ОБУЧЕНИЕ ЗАВЕРШЕНО ===")
+    
+    print("\n🔍 Проверка сохраненных файлов:")
+    saved_files = [
+        'models/xlstm_rl_model.keras',
+        'models/xlstm_rl_scaler.pkl',
+        'models/market_regime_detector.pkl'
+    ]
+
+    for file_path in saved_files:
+        if os.path.exists(file_path):
+            size = os.path.getsize(file_path) / (1024*1024)  # MB
+            print(f"✅ {file_path} ({size:.1f} MB)")
+        else:
+            print(f"❌ {file_path} не найден")
+
+    # Проверяем RL агентов
+    for symbol in rl_symbols:
+        rl_path = f'models/rl_agent_{symbol}'
+        if os.path.exists(rl_path + '.zip'):
+            size = os.path.getsize(rl_path + '.zip') / (1024*1024)
+            print(f"✅ {rl_path}.zip ({size:.1f} MB)")
+            
     return xlstm_model, rl_agent
 
 if __name__ == '__main__':

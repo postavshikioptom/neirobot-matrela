@@ -97,7 +97,13 @@ class XLSTMLayer(Layer):
         
         if self.return_sequences:
             # ✅ СЛУЧАЙ 1: Возвращаем все выходы
-            outputs = tf.TensorArray(dtype=tf.float32, size=seq_len)
+            # ✅ ИСПРАВЛЕНИЕ: Фиксированный размер и maximum_iterations для XLA
+            outputs = tf.TensorArray(
+                dtype=tf.float32,
+                size=seq_len,
+                dynamic_size=False,  # ✅ Фиксированный размер
+                clear_after_read=False  # ✅ Для стабильности
+            )
             
             def step_fn(t, states, outputs_ta):
                 current_input = inputs[:, t, :]
@@ -108,10 +114,12 @@ class XLSTMLayer(Layer):
             def condition(t, states, outputs_ta):
                 return t < seq_len
             
+            # ✅ КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: добавляем maximum_iterations
             _, final_states, outputs = tf.while_loop(
-                condition, step_fn, 
+                condition, step_fn,
                 [0, states, outputs],
-                parallel_iterations=1
+                parallel_iterations=1,
+                maximum_iterations=seq_len  # ✅ Для XLA
             )
             
             # Собираем все выходы
@@ -128,10 +136,12 @@ class XLSTMLayer(Layer):
             def condition_last(t, states, last_output):  # ✅ Отдельное условие!
                 return t < seq_len
             
+            # ✅ КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: добавляем maximum_iterations
             _, _, last_output = tf.while_loop(
-                condition_last, step_fn_last,  # ✅ Правильное условие
+                condition_last, step_fn_last,
                 [0, states, tf.zeros((batch_size, self.units))],
-                parallel_iterations=1
+                parallel_iterations=1,
+                maximum_iterations=seq_len  # ✅ Для XLA
             )
             
             return last_output
