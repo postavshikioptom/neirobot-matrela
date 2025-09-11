@@ -82,3 +82,4 @@ xlsxwriter>=3.0.0
 shap
 lime
 TA-Lib
+imbalanced-learn

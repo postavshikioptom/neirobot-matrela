@@ -68,16 +68,16 @@ python run_live_trading.py
 
 python trade_statistics.py - показывает всю статистику модели за последние 100 сделок на Bybit торговле
 python lime_analytics.py - аналитика отдельных сделок по логам торгов. Запускать отдельно после обучения.
+python train_model.py - обучение matrela
 python train_model.py --model all  - обучение LSTM и xLSTM
 python train_model.py --model xlstm_indicator - обучение только одной модели
 
 
 СИМУЛЯЦИИ (торговля по подной монете за раз, типа нам ее передал Скринер, можно любую монету выбрать)
+simulation_engine_advanced.py
 python run_simulation.py --symbol ALGOUSDT --mode LSTM_only
-python run_simulation.py --symbol ALGOUSDT --mode xLSTM_only
-python run_simulation.py --symbol ALGOUSDT --mode Consensus  это две модели вместе
-python run_multi_symbol_simulation.py --mode Consensus - берет монету из скринера. Дерьмовая симуляци
-python standard_simulation.py --mode Consensus
+
+
 python test_patterns.py - проверка паттернов на работоспособность
 
 РАЗ В НЕДЕЛЮ ОБУЧАТь на новых исторических данных свечей

@@ -12,7 +12,7 @@ class HybridDecisionMaker:
     def __init__(self, xlstm_model_path, rl_agent_path, feature_columns, sequence_length):
         self.sequence_length = sequence_length
         self.xlstm_model = XLSTMRLModel(input_shape=(self.sequence_length, len(feature_columns)))
-        self.xlstm_model.load_model(xlstm_model_path, xlstm_model_path.replace('.keras', '_scaler.pkl'))
+        self.xlstm_model.load_model(xlstm_model_path, 'models/xlstm_rl_scaler.pkl')
         
         self.rl_agent = IntelligentRLAgent()
         self.rl_agent.load_agent(rl_agent_path)

@@ -43,7 +43,7 @@ class IntelligentRLAgent:
                 gamma=0.99,
                 gae_lambda=0.95,
                 clip_range=0.2,
-                ent_coef=0.01,
+                ent_coef=0.03, # <--- ИЗМЕНЕНО с 0.01 на 0.03 (увеличиваем энтропию)
                 vf_coef=0.5,
                 max_grad_norm=0.5,
                 policy_kwargs=dict(
@@ -67,7 +67,7 @@ class IntelligentRLAgent:
                 gamma=0.99,
                 train_freq=1,
                 gradient_steps=1,
-                ent_coef='auto',
+                ent_coef='auto', # Можно оставить 'auto' или задать конкретное значение, например, 0.03
                 policy_kwargs=dict(net_arch=[256, 256]),
                 verbose=0, # <-- ИЗМЕНЕНО: 0 для отключения детального логирования
                 tensorboard_log="./tensorboard_logs/",

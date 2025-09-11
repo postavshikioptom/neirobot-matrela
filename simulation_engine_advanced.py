@@ -21,11 +21,12 @@ class AdvancedSimulationEngine:
         
         # Признаки для новой системы
         self.feature_columns = [
-            'RSI_14', 'MACD_12_26_9', 'BBL_20_2.0', 'BBM_20_2.0', 'BBU_20_2.0', 
+            'RSI_14', 'MACD_12_26_9', 'BBL_20_2.0', 'BBM_20_2.0', 'BBU_20_2.0',
             'ADX_14', 'STOCHk_14_3_3', 'STOCHd_14_3_3',
-            'CDLHAMMER', 'CDLENGULFING', 'CDLDOJI', 'CDLSHOOTINGSTAR', 
+            'ATR_14', # <--- ДОБАВЛЕНО
+            'CDLHAMMER', 'CDLENGULFING', 'CDLDOJI', 'CDLSHOOTINGSTAR',
             'CDLHANGINGMAN', 'CDLMARUBOZU',
-            'vsa_no_demand', 'vsa_no_supply', 'vsa_stopping_volume', 
+            'vsa_no_demand', 'vsa_no_supply', 'vsa_stopping_volume',
             'vsa_climactic_volume', 'vsa_test', 'vsa_effort_vs_result', 'vsa_strength',
             'volume_ratio', 'spread_ratio', 'close_position'
         ]

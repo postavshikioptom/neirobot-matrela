@@ -1,7 +1,8 @@
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Dense, Dropout, Input, Attention
+from tensorflow.keras.layers import Dense, Dropout, Input, Attention, LayerNormalization
+from tensorflow.keras.regularizers import l2 # <--- ДОБАВЬТЕ ЭТОТ ИМПОРТ
 from tensorflow.keras.optimizers import Adam
 from sklearn.preprocessing import StandardScaler
 import pickle
@@ -35,16 +36,20 @@ class XLSTMRLModel:
             units=self.memory_units,
             memory_size=self.memory_size,
             return_sequences=True,
+            recurrent_dropout=0.2, # <--- ДОБАВЛЕНО: recurrent_dropout
             name='xlstm_memory_layer_1'
         )(inputs)
+        xlstm1 = LayerNormalization()(xlstm1) # <--- ДОБАВЛЕНО: LayerNormalization
         
         # Второй xLSTM слой
         xlstm2 = XLSTMLayer(
             units=self.memory_units // 2,
             memory_size=self.memory_size // 2,
             return_sequences=True,
+            recurrent_dropout=0.2, # <--- ДОБАВЛЕНО: recurrent_dropout
             name='xlstm_memory_layer_2'
         )(xlstm1)
+        xlstm2 = LayerNormalization()(xlstm2) # <--- ДОБАВЛЕНО: LayerNormalization
         
         # Механизм внимания
         attention = Attention(name='attention_mechanism')([xlstm2, xlstm2])
@@ -54,15 +59,17 @@ class XLSTMRLModel:
             units=self.attention_units,
             memory_size=self.attention_units,
             return_sequences=False,
+            recurrent_dropout=0.2, # <--- ДОБАВЛЕНО: recurrent_dropout
             name='xlstm_memory_final'
         )(attention)
+        xlstm_final = LayerNormalization()(xlstm_final) # <--- ДОБАВЛЕНО: LayerNormalization
         
         # Классификационные слои
-        dense1 = Dense(64, activation='relu', name='dense_1')(xlstm_final)
-        dropout1 = Dropout(0.3)(dense1)
+        dense1 = Dense(64, activation='relu', kernel_regularizer=l2(0.001), name='dense_1')(xlstm_final) # <--- ДОБАВЛЕНО: kernel_regularizer=l2(0.001)
+        dropout1 = Dropout(0.4)(dense1) # <--- ИЗМЕНЕНО с 0.3 на 0.4
         
-        dense2 = Dense(32, activation='relu', name='dense_2')(dropout1)
-        dropout2 = Dropout(0.2)(dense2)
+        dense2 = Dense(32, activation='relu', kernel_regularizer=l2(0.001), name='dense_2')(dropout1) # <--- ДОБАВЛЕНО: kernel_regularizer=l2(0.001)
+        dropout2 = Dropout(0.3)(dense2) # <--- ИЗМЕНЕНО с 0.2 на 0.3
         
         # Выходной слой
         outputs = Dense(3, activation='softmax', name='output_layer')(dropout2)
@@ -74,7 +81,7 @@ class XLSTMRLModel:
         return self.model
     
     # ... остальные методы остаются без изменений
-    def train(self, X_train, y_train, X_val, y_val, epochs=100, batch_size=32, custom_callbacks=None):
+    def train(self, X_train, y_train, X_val, y_val, epochs=100, batch_size=32, custom_callbacks=None, class_weight=None): # <--- ДОБАВЛЕНО: class_weight=None
         """Обучение с улучшенной стабильностью"""
         if self.model is None:
             self.build_model()
@@ -90,7 +97,7 @@ class XLSTMRLModel:
         callbacks = [
             tf.keras.callbacks.EarlyStopping(
                 monitor='val_loss',
-                patience=25,
+                patience=35,  # <--- ИЗМЕНЕНО с 25 на 35 (или даже 40-50)
                 restore_best_weights=True,
                 verbose=1
             ),
@@ -119,32 +126,25 @@ class XLSTMRLModel:
             learning_rate=0.001,
             clipnorm=1.0
         )
-        self.model.compile(
-            optimizer=optimizer,
-            loss='categorical_crossentropy',
-            metrics=['accuracy', 'precision', 'recall']
-        )
+        # Компиляция будет выполняться в train_model.py, чтобы можно было легко
+        # добавить label_smoothing. Оставляем этот блок для обратной совместимости,
+        # если модель используется отдельно.
+        if not self.model.optimizer:
+            self.model.compile(
+                optimizer=optimizer,
+                loss='categorical_crossentropy',
+                metrics=['accuracy', 'precision', 'recall']
+            )
         
-        # ДОБАВЬТЕ: Вычисление весов классов для борьбы с дисбалансом
-        y_integers = np.argmax(y_train, axis=1) # Преобразуем one-hot в целые числа
-        class_weights_array = compute_class_weight(
-            'balanced',
-            classes=np.unique(y_integers),
-            y=y_integers
-        )
-        class_weight_dict = {i: class_weights_array[i] for i in range(len(class_weights_array))}
-
-        print(f"📊 Веса классов для обучения: {class_weight_dict}")
-
         # Обучение с нормализованными данными
         history = self.model.fit(
             X_train_scaled, y_train,
             validation_data=(X_val_scaled, y_val),
             epochs=epochs,
             batch_size=batch_size,
-            class_weight=class_weight_dict,  # <-- ДОБАВЛЕНО: передаем веса классов
+            class_weight=class_weight,  # <--- ИЗМЕНЕНО: передаем class_weight
             callbacks=callbacks,
-            verbose=0, # Изменяем на 0 для уменьшения логирования
+            verbose=0,
             shuffle=True
         )
         

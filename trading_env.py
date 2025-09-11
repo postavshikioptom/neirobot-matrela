@@ -85,11 +85,12 @@ class TradingEnvRL(gym.Env):
         
         # Определяем колонки признаков (адаптируйте под ваши данные)
         self.feature_columns = [
-            'RSI_14', 'MACD_12_26_9', 'BBL_20_2.0', 'BBM_20_2.0', 'BBU_20_2.0', 
+            'RSI_14', 'MACD_12_26_9', 'BBL_20_2.0', 'BBM_20_2.0', 'BBU_20_2.0',
             'ADX_14', 'STOCHk_14_3_3', 'STOCHd_14_3_3',
-            'CDLHAMMER', 'CDLENGULFING', 'CDLDOJI', 'CDLSHOOTINGSTAR', 
+            'ATR_14', # <--- ДОБАВЛЕНО
+            'CDLHAMMER', 'CDLENGULFING', 'CDLDOJI', 'CDLSHOOTINGSTAR',
             'CDLHANGINGMAN', 'CDLMARUBOZU',
-            'vsa_no_demand', 'vsa_no_supply', 'vsa_stopping_volume', 
+            'vsa_no_demand', 'vsa_no_supply', 'vsa_stopping_volume',
             'vsa_climactic_volume', 'vsa_test', 'vsa_effort_vs_result', 'vsa_strength'
         ]
         
@@ -161,20 +162,22 @@ class TradingEnvRL(gym.Env):
         """
         base_reward = pnl_pct if pnl_pct != 0 else 0
         
-        # Бонусы за качественные VSA сигналы
+        # Бонусы за качественные VSA сигналы (ОСЛАБЛЕНЫ ПОРОГИ)
         vsa_bonus = 0
-        if action in [0, 1]:
-            if action == 1 and (vsa_features[1] > 0 or vsa_features[2] > 0):
-                vsa_bonus = 3
-            elif action == 0 and (vsa_features[0] > 0 or vsa_features[3] > 0):
-                vsa_bonus = 3
+        if action in [0, 1]: # SELL или BUY
+            # BUY (действие 1): если есть no_supply (vsa_features[1]) или stopping_volume (vsa_features[2])
+            if action == 1 and (vsa_features[1] > 0 or vsa_features[2] > 0 or vsa_features[6] > 0.2): # Добавлено: vsa_strength > 0.2
+                vsa_bonus = 2 # СНИЖЕНО с 3 до 2, чтобы не перевешивать PnL
+            # SELL (действие 0): если есть no_demand (vsa_features[0]) или climactic_volume (vsa_features[3])
+            elif action == 0 and (vsa_features[0] > 0 or vsa_features[3] > 0 or vsa_features[6] < -0.2): # Добавлено: vsa_strength < -0.2
+                vsa_bonus = 2 # СНИЖЕНО с 3 до 2
 
-        # Штраф за противоречащие VSA сигналы
+        # Штраф за противоречащие VSA сигналы (ОСЛАБЛЕНЫ ПОРОГИ)
         vsa_penalty = 0
-        if action == 1 and (vsa_features[0] > 0 or vsa_features[3] > 0):
-            vsa_penalty = -5
-        elif action == 0 and (vsa_features[1] > 0 or vsa_features[2] > 0):
-            vsa_penalty = -5
+        if action == 1 and (vsa_features[0] > 0 or vsa_features[3] > 0 or vsa_features[6] < -0.5): # Усилен порог для penalization
+            vsa_penalty = -3 # СНИЖЕНО с -5 до -3
+        elif action == 0 and (vsa_features[1] > 0 or vsa_features[2] > 0 or vsa_features[6] > 0.5): # Усилен порог для penalization
+            vsa_penalty = -3 # СНИЖЕНО с -5 до -3
 
         # Бонус за скорость закрытия прибыльных позиций
         speed_bonus = 0
@@ -202,6 +205,46 @@ class TradingEnvRL(gym.Env):
         if self.balance < self.initial_balance * 0.9:
             base_reward -= 5
 
-        total_reward = base_reward + vsa_bonus + vsa_penalty + speed_bonus + hold_penalty
+        # =====================================================================
+        # НОВЫЙ БЛОК: БОНУС ЗА ИССЛЕДОВАНИЕ (Exploration Bonus)
+        # =====================================================================
+        exploration_bonus = 0
+        # Небольшой бонус за попытку BUY/SELL, чтобы агент не застрял в HOLD
+        if action in [0, 1]: # Если действие - BUY или SELL
+            # Бонус уменьшается по мере увеличения числа попыток этого действия
+            # Используем небольшой постоянный бонус, чтобы стимулировать попытки
+            exploration_bonus = 0.5 # Небольшой, но постоянный бонус
+        
+        # Можно сделать более сложный бонус, зависящий от редкости действия
+        # Например, если бы мы отслеживали, сколько раз каждое действие было выбрано
+        # Но для простоты начнем с постоянного бонуса
+        # =====================================================================
+        # КОНЕЦ НОВОГО БЛОКА
+        # =====================================================================
+
+        # =====================================================================
+        # НОВЫЙ БЛОК: БОНУС ЗА ЭНТРОПИЮ (Entropy Regularization)
+        # =====================================================================
+        entropy_bonus = 0
+        # Стимулируем разнообразие действий (энтропия предсказаний xLSTM)
+        # Если предсказания xLSTM близки к равномерному распределению (высокая энтропия),
+        # это может означать неопределенность, и RL агент должен быть более осторожным или исследовать.
+        # Однако, здесь мы хотим, чтобы RL агент активно исследовал, а не застревал в HOLD.
+        # Поэтому, дадим небольшой бонус, если xlstm_prediction не слишком сильно смещено к одному классу.
+        
+        # Вычисляем энтропию xLSTM предсказаний
+        # Добавляем очень маленькое число, чтобы избежать log(0)
+        entropy = -np.sum(xlstm_prediction * np.log(xlstm_prediction + 1e-10))
+        
+        # Нормализуем энтропию (для 3 классов, макс энтропия = log(3) ~ 1.09)
+        normalized_entropy = entropy / np.log(len(xlstm_prediction))
+        
+        # Даем бонус за высокую энтропию (т.е. за неопределенность xLSTM, чтобы RL исследовал)
+        entropy_bonus = normalized_entropy * 0.5 # Можно экспериментировать с множителем (например, 0.2, 0.5, 1.0)
+        # =====================================================================
+        # КОНЕЦ НОВОГО БЛОКА
+        # =====================================================================
+
+        total_reward = base_reward + vsa_bonus + vsa_penalty + speed_bonus + hold_penalty + exploration_bonus + entropy_bonus # <--- ДОБАВЛЕНО: entropy_bonus
         
         return total_reward

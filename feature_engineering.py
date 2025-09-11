@@ -76,6 +76,14 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         except Exception:
             df_out['RSI_14'] = 0
             
+        # ДОБАВЬТЕ ЭТОТ БЛОК для ATR_14
+        try:
+            atr = talib.ATR(high_p, low_p, close_p, timeperiod=14)
+            atr[np.isinf(atr)] = np.nan
+            df_out['ATR_14'] = pd.Series(atr, index=df_out.index).ffill().fillna(0)
+        except Exception:
+            df_out['ATR_14'] = 0
+            
         try:
             macd, macdsignal, macdhist = talib.MACD(close_p, fastperiod=12, slowperiod=26, signalperiod=9)
             df_out['MACD_12_26_9'] = pd.Series(macd, index=df_out.index).replace([np.inf, -np.inf], np.nan).ffill().fillna(0)
@@ -105,6 +113,28 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
             df_out['STOCHd_14_3_3'] = pd.Series(slowd, index=df_out.index).replace([np.inf, -np.inf], np.nan).ffill().fillna(0)
         except Exception:
             df_out['STOCHk_14_3_3'], df_out['STOCHd_14_3_3'] = 0, 0
+
+        # =====================================================================
+        # НОВЫЙ БЛОК: СОЗДАНИЕ ПРИЗНАКА 'is_event' (для Event-Based Sampling)
+        # =====================================================================
+        # Определяем события, которые потенциально содержат сигналы
+        # Используем существующие индикаторы и добавляем RSI/ATR/Volume/ADX изменения
+        
+        # Убедимся, что все нужные колонки существуют (ATR_14 уже добавлен)
+        required_cols = ['volume', 'ATR_14', 'RSI_14', 'ADX_14']
+        for col in required_cols:
+            if col not in df_out.columns:
+                df_out[col] = 0 # Заполняем нулями, если вдруг нет
+
+        df_out['is_event'] = (
+            (df_out['volume'] > df_out['volume'].rolling(50).quantile(0.9).fillna(0)) | # Объем > 90% квантиля
+            (df_out['ATR_14'] > df_out['ATR_14'].rolling(50).quantile(0.9).fillna(0)) | # ATR > 90% квантиля
+            (abs(df_out['RSI_14'] - 50) > 25) | # RSI выходит из зоны 25-75 (более экстремально)
+            (df_out['ADX_14'] > df_out['ADX_14'].shift(5).fillna(0) + 2) # ADX растёт > 2 пункта за 5 баров
+        ).astype(int)
+        # =====================================================================
+        # КОНЕЦ НОВОГО БЛОКА 'is_event'
+        # =====================================================================
 
         return df_out
 
