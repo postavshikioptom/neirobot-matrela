@@ -84,21 +84,58 @@ def prepare_xlstm_rl_data(data_path, sequence_length=10):
         
         # Создаем целевые метки на основе будущих цен + VSA подтверждения
         df['future_return'] = (df['close'].shift(-5) - df['close']) / df['close']
-        df['target'] = 2  # По умолчанию HOLD
-        
-        # BUY: положительная доходность + VSA подтверждение покупки
+        # df['target'] = 2  # По умолчанию HOLD - эту строку мы теперь устанавливаем ниже
+
+        # BUY: положительная доходность + VSA подтверждение покупки (СНИЖЕНЫ ПОРОГИ)
         buy_condition = (
-            (df['future_return'] > 0.01) &  # >1% роста
-            ((df['vsa_no_supply'] == 1) | (df['vsa_stopping_volume'] == 1) | (df['vsa_strength'] > 1))
+            (df['future_return'] > 0.003) &  # СНИЖЕНО с 0.01 до 0.003 (0.3% роста)
+            ((df['vsa_no_supply'] == 1) | (df['vsa_stopping_volume'] == 1) | (df['vsa_strength'] > 0.5)) # СНИЖЕНО с 1 до 0.5
         )
-        df.loc[buy_condition, 'target'] = 0
         
-        # SELL: отрицательная доходность + VSA подтверждение продажи
+        # SELL: отрицательная доходность + VSA подтверждение продажи (СНИЖЕНЫ ПОРОГИ)
         sell_condition = (
-            (df['future_return'] < -0.01) &  # >1% падения
-            ((df['vsa_no_demand'] == 1) | (df['vsa_climactic_volume'] == 1) | (df['vsa_strength'] < -1))
+            (df['future_return'] < -0.003) &  # СНИЖЕНО с -0.01 до -0.003 (-0.3% падения)
+            ((df['vsa_no_demand'] == 1) | (df['vsa_climactic_volume'] == 1) | (df['vsa_strength'] < -0.5)) # СНИЖЕНО с -1 до -0.5
         )
-        df.loc[sell_condition, 'target'] = 1
+        
+        # Сначала устанавливаем все в HOLD, затем переписываем
+        df['target'] = 2  # По умолчанию HOLD
+        df.loc[buy_condition, 'target'] = 0 # BUY
+        df.loc[sell_condition, 'target'] = 1 # SELL
+
+        # ДОБАВЬТЕ: Принудительная балансировка классов (если необходимо)
+        # Этот блок можно включать, если после ослабления порогов баланс все еще очень плохой.
+        # Он попытается переклассифицировать часть "HOLD" в BUY/SELL на основе других индикаторов.
+        # Это может быть "грязным" решением, но иногда необходимо для обучения.
+        current_buy_count = (df['target'] == 0).sum()
+        current_sell_count = (df['target'] == 1).sum()
+        current_hold_count = (df['target'] == 2).sum()
+
+        if current_hold_count > (current_buy_count + current_sell_count) * 2: # Если HOLD в 2+ раза больше
+            print(f"⚠️ Сильный дисбаланс классов. Попытка переклассификации части HOLD-сигналов.")
+            hold_indices = df[df['target'] == 2].index
+            
+            import random
+            random.seed(42) # Для воспроизводимости
+            
+            # Переклассифицируем 15% HOLD в BUY/SELL на основе RSI, ADX
+            reclassify_count = int(current_hold_count * 0.15)
+            if reclassify_count > 0:
+                reclassify_indices = random.sample(list(hold_indices), min(reclassify_count, len(hold_indices)))
+                
+                for idx in reclassify_indices:
+                    # Простая логика: если RSI < 35 и ADX растет -> BUY
+                    if df.loc[idx, 'RSI_14'] < 35 and df.loc[idx, 'ADX_14'] > df.loc[idx-1, 'ADX_14']:
+                        df.loc[idx, 'target'] = 0  # BUY
+                    # Если RSI > 65 и ADX растет -> SELL
+                    elif df.loc[idx, 'RSI_14'] > 65 and df.loc[idx, 'ADX_14'] > df.loc[idx-1, 'ADX_14']:
+                        df.loc[idx, 'target'] = 1  # SELL
+            
+            print(f"Баланс классов после переклассификации:")
+            unique, counts = np.unique(df['target'], return_counts=True)
+            class_names = ['BUY', 'SELL', 'HOLD']
+            for class_idx, count in zip(unique, counts):
+                print(f"  {class_names[class_idx]}: {count} ({count/len(df)*100:.1f}%)")
         
         # Убираем NaN и обеспечиваем наличие всех признаков
         df.dropna(subset=['future_return'], inplace=True)
@@ -246,7 +283,7 @@ def train_xlstm_rl_system(X, y, processed_dfs, feature_cols):
                 factor=0.5,
                 patience=15,
                 min_lr=1e-7,
-                verbose=1
+                verbose=0 # <-- ИЗМЕНЕНО: 0 для отключения логирования изменений LR
             )
         ]
     )

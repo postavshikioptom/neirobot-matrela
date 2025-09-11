@@ -50,8 +50,9 @@ class IntelligentRLAgent:
                     net_arch=dict(pi=[256, 128, 64], vf=[256, 128, 64]),
                     activation_fn=torch.nn.ReLU
                 ),
-                verbose=1,
-                tensorboard_log="./tensorboard_logs/"
+                verbose=0, # <-- ИЗМЕНЕНО: 0 для отключения детального логирования
+                tensorboard_log="./tensorboard_logs/",
+                progress_bar=False # <-- ДОБАВЛЕНО: отключаем прогресс-бар
             )
             
         elif self.algorithm == 'SAC':
@@ -68,8 +69,9 @@ class IntelligentRLAgent:
                 gradient_steps=1,
                 ent_coef='auto',
                 policy_kwargs=dict(net_arch=[256, 256]),
-                verbose=1,
-                tensorboard_log="./tensorboard_logs/"
+                verbose=0, # <-- ИЗМЕНЕНО: 0 для отключения детального логирования
+                tensorboard_log="./tensorboard_logs/",
+                progress_bar=False # <-- ДОБАВЛЕНО: отключаем прогресс-бар
             )
             
         return self.model
@@ -98,7 +100,7 @@ class IntelligentRLAgent:
         self.model.learn(
             total_timesteps=total_timesteps,
             callback=eval_callback,
-            progress_bar=True
+            progress_bar=False # <-- ИЗМЕНЕНО
         )
         
         return self.model

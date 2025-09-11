@@ -159,7 +159,7 @@ def manage_active_positions(session, decision_maker):
                 close_result = trade_manager.close_market_position(session, symbol, pos['quantity'], pos['side'])
                 if close_result.get('status') == 'SUCCESS':
                     # Логируем с объяснением решения
-                    log_enhanced_trade(symbol, 'CLOSE', close_result, pos, pnl_pct,
+                    trade_logger.log_enhanced_trade_with_quality_metrics(symbol, 'CLOSE', close_result, pos, pnl_pct,
                                      decision_maker, features_df.iloc[-1], close_reason)
                     notification_system.send_trade_alert(symbol, "CLOSE", close_result['price'], pnl_pct, reason=close_reason)
                     performance_monitor.log_trade_closed(symbol, pnl_pct)
@@ -253,7 +253,7 @@ def process_new_signal(session, symbol, decision_maker):
                     performance_monitor.log_trade_opened(symbol, decision, vsa_confirmed=True)
                     # Логируем с полной информацией
                     notification_system.send_trade_alert(symbol, "OPEN", open_result['price'], reason=f"VSA_CONFIRMED_{decision}")
-                    log_enhanced_trade(symbol, 'OPEN', open_result, None, 0,
+                    trade_logger.log_enhanced_trade_with_quality_metrics(symbol, 'OPEN', open_result, None, 0,
                                      decision_maker, features_df.iloc[-1], f"VSA_CONFIRMED_{decision}")
                     
                     # Сохраняем позицию
@@ -319,52 +319,6 @@ def validate_decision_with_vsa(row, decision):
     
     return False
 
-def log_enhanced_trade(symbol, action, trade_result, position, pnl, decision_maker, features_row, reason):
-    """Расширенное логирование сделок с VSA и RL информацией"""
-    
-    log_data = {
-        'symbol': symbol,
-        'action': action,
-        'reason': reason,
-        'order_type': trade_result.get('price', 'N/A'),
-        'price': trade_result.get('price', 'N/A'),
-        'quantity': trade_result.get('quantity', 'N/A'),
-        'usdt_amount': float(trade_result.get('price', 0)) * float(trade_result.get('quantity', 0)),
-        'bybit_order_id': trade_result.get('bybit_order_id', 'N/A'),
-        'status': trade_result.get('status', 'UNKNOWN'),
-        'pnl': pnl if pnl else 0,
-        
-        # VSA информация
-        'vsa_no_demand': features_row.get('vsa_no_demand', 0),
-        'vsa_no_supply': features_row.get('vsa_no_supply', 0),
-        'vsa_stopping_volume': features_row.get('vsa_stopping_volume', 0),
-        'vsa_climactic_volume': features_row.get('vsa_climactic_volume', 0),
-        'vsa_test': features_row.get('vsa_test', 0),
-        'vsa_effort_vs_result': features_row.get('vsa_effort_vs_result', 0),
-        'vsa_strength': features_row.get('vsa_strength', 0),
-        'volume_ratio': features_row.get('volume_ratio', 0),
-        'spread_ratio': features_row.get('spread_ratio', 0),
-        
-        # Технические индикаторы
-        'RSI_14': features_row.get('RSI_14', 0),
-        'MACD_12_26_9': features_row.get('MACD_12_26_9', 0),
-        'ADX_14': features_row.get('ADX_14', 0),
-    }
-    
-    # Добавляем информацию о решении, если доступна
-    if hasattr(decision_maker, 'decision_history') and decision_maker.decision_history:
-        last_decision = decision_maker.decision_history[-1]
-        log_data.update({
-            'xlstm_buy_prob': last_decision['xlstm_prediction'][0],
-            'xlstm_sell_prob': last_decision['xlstm_prediction'][1], 
-            'xlstm_hold_prob': last_decision['xlstm_prediction'][2],
-            'xlstm_confidence': last_decision['xlstm_confidence'],
-            'rl_decision': last_decision['rl_decision'],
-            'vsa_bullish_strength': last_decision['vsa_signals']['bullish_strength'],
-            'vsa_bearish_strength': last_decision['vsa_signals']['bearish_strength'],
-        })
-    
-    trade_logger.log_trade(log_data)
 
 def run_trading_loop():
     """Главный торговый цикл с новой архитектурой"""

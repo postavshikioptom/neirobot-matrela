@@ -7,6 +7,7 @@ from sklearn.preprocessing import StandardScaler
 import pickle
 import os
 from .xlstm_memory_cell import XLSTMLayer  # Импортируем настоящий xLSTM
+from sklearn.utils.class_weight import compute_class_weight
 
 class XLSTMRLModel:
     """
@@ -96,9 +97,9 @@ class XLSTMRLModel:
             tf.keras.callbacks.ModelCheckpoint(
                 'models/xlstm_checkpoint_epoch_{epoch:02d}.keras',
                 monitor='val_loss',
-                save_best_only=False,
-                save_freq=10,
-                verbose=1
+                save_best_only=False, # Можно оставить False, чтобы иметь все эпохи
+                save_freq='epoch',  # <-- ИЗМЕНЕНО: сохраняем каждую эпоху
+                verbose=0 # <-- ИЗМЕНЕНО: отключаем подробное логирование сохранения
             ),
             tf.keras.callbacks.ModelCheckpoint(
                 'models/xlstm_checkpoint_latest.keras',
@@ -124,14 +125,26 @@ class XLSTMRLModel:
             metrics=['accuracy', 'precision', 'recall']
         )
         
+        # ДОБАВЬТЕ: Вычисление весов классов для борьбы с дисбалансом
+        y_integers = np.argmax(y_train, axis=1) # Преобразуем one-hot в целые числа
+        class_weights_array = compute_class_weight(
+            'balanced',
+            classes=np.unique(y_integers),
+            y=y_integers
+        )
+        class_weight_dict = {i: class_weights_array[i] for i in range(len(class_weights_array))}
+
+        print(f"📊 Веса классов для обучения: {class_weight_dict}")
+
         # Обучение с нормализованными данными
         history = self.model.fit(
             X_train_scaled, y_train,
             validation_data=(X_val_scaled, y_val),
             epochs=epochs,
             batch_size=batch_size,
+            class_weight=class_weight_dict,  # <-- ДОБАВЛЕНО: передаем веса классов
             callbacks=callbacks,
-            verbose=1,
+            verbose=0, # Изменяем на 0 для уменьшения логирования
             shuffle=True
         )
         
