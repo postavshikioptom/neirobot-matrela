@@ -43,7 +43,7 @@ class IntelligentRLAgent:
                 gamma=0.99,
                 gae_lambda=0.95,
                 clip_range=0.2,
-                ent_coef=0.03, # <--- ИЗМЕНЕНО с 0.01 на 0.03 (увеличиваем энтропию)
+                ent_coef=0.05, # <--- ИЗМЕНЕНО с 0.03 на 0.05 (увеличиваем энтропию еще больше)
                 vf_coef=0.5,
                 max_grad_norm=0.5,
                 policy_kwargs=dict(

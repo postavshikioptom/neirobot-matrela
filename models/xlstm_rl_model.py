@@ -2,7 +2,7 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Dense, Dropout, Input, Attention, LayerNormalization
-from tensorflow.keras.regularizers import l2 # <--- ДОБАВЬТЕ ЭТОТ ИМПОРТ
+from tensorflow.keras.regularizers import l2 # <--- ИЗМЕНЕНО: Удален импорт l1
 from tensorflow.keras.optimizers import Adam
 from sklearn.preprocessing import StandardScaler
 import pickle
@@ -36,7 +36,6 @@ class XLSTMRLModel:
             units=self.memory_units,
             memory_size=self.memory_size,
             return_sequences=True,
-            recurrent_dropout=0.2, # <--- ДОБАВЛЕНО: recurrent_dropout
             name='xlstm_memory_layer_1'
         )(inputs)
         xlstm1 = LayerNormalization()(xlstm1) # <--- ДОБАВЛЕНО: LayerNormalization
@@ -46,7 +45,6 @@ class XLSTMRLModel:
             units=self.memory_units // 2,
             memory_size=self.memory_size // 2,
             return_sequences=True,
-            recurrent_dropout=0.2, # <--- ДОБАВЛЕНО: recurrent_dropout
             name='xlstm_memory_layer_2'
         )(xlstm1)
         xlstm2 = LayerNormalization()(xlstm2) # <--- ДОБАВЛЕНО: LayerNormalization
@@ -59,20 +57,23 @@ class XLSTMRLModel:
             units=self.attention_units,
             memory_size=self.attention_units,
             return_sequences=False,
-            recurrent_dropout=0.2, # <--- ДОБАВЛЕНО: recurrent_dropout
             name='xlstm_memory_final'
         )(attention)
         xlstm_final = LayerNormalization()(xlstm_final) # <--- ДОБАВЛЕНО: LayerNormalization
         
-        # Классификационные слои
-        dense1 = Dense(64, activation='relu', kernel_regularizer=l2(0.001), name='dense_1')(xlstm_final) # <--- ДОБАВЛЕНО: kernel_regularizer=l2(0.001)
-        dropout1 = Dropout(0.4)(dense1) # <--- ИЗМЕНЕНО с 0.3 на 0.4
+        # УСИЛЕННАЯ РЕГУЛЯРИЗАЦИЯ
+        dense1 = Dense(64, activation='relu', kernel_regularizer=l2(0.002), name='dense_1')(xlstm_final)  # Увеличиваем L2
+        dropout1 = Dropout(0.5)(dense1)  # Увеличиваем dropout с 0.4 до 0.5
         
-        dense2 = Dense(32, activation='relu', kernel_regularizer=l2(0.001), name='dense_2')(dropout1) # <--- ДОБАВЛЕНО: kernel_regularizer=l2(0.001)
-        dropout2 = Dropout(0.3)(dense2) # <--- ИЗМЕНЕНО с 0.2 на 0.3
+        dense2 = Dense(32, activation='relu', kernel_regularizer=l2(0.002), name='dense_2')(dropout1)  # Увеличиваем L2
+        dropout2 = Dropout(0.4)(dense2)  # Увеличиваем dropout с 0.3 до 0.4
         
-        # Выходной слой
-        outputs = Dense(3, activation='softmax', name='output_layer')(dropout2)
+        # ДОБАВЛЯЕМ ДОПОЛНИТЕЛЬНЫЙ СЛОЙ ДЛЯ ЛУЧШЕЙ РЕГУЛЯРИЗАЦИИ
+        dense3 = Dense(16, activation='relu', kernel_regularizer=l2(0.001), name='dense_3')(dropout2)
+        dropout3 = Dropout(0.3)(dense3)
+        
+        # НОВЫЙ КОД
+        outputs = Dense(3, activation='softmax', name='output_layer')(dropout3)  # Используем dropout3
         
         self.model = Model(inputs=inputs, outputs=outputs, name='True_xLSTM_RL_Model')
         
@@ -126,15 +127,7 @@ class XLSTMRLModel:
             learning_rate=0.001,
             clipnorm=1.0
         )
-        # Компиляция будет выполняться в train_model.py, чтобы можно было легко
-        # добавить label_smoothing. Оставляем этот блок для обратной совместимости,
-        # если модель используется отдельно.
-        if not self.model.optimizer:
-            self.model.compile(
-                optimizer=optimizer,
-                loss='categorical_crossentropy',
-                metrics=['accuracy', 'precision', 'recall']
-            )
+        # Модель теперь компилируется в train_model.py
         
         # Обучение с нормализованными данными
         history = self.model.fit(
@@ -179,7 +172,8 @@ class XLSTMRLModel:
         """
         Загрузка модели и скейлера
         """
-        self.model = tf.keras.models.load_model(model_path, custom_objects={'XLSTMLayer': XLSTMLayer})
+        from train_model import CustomFocalLoss # ИЗМЕНЕНО: Импортируем новый класс Focal Loss
+        self.model = tf.keras.models.load_model(model_path, custom_objects={'XLSTMLayer': XLSTMLayer, 'CustomFocalLoss': CustomFocalLoss}) # ИЗМЕНЕНО: Добавляем CustomFocalLoss
         
         with open(scaler_path, 'rb') as f:
             self.scaler = pickle.load(f)

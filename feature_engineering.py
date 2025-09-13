@@ -3,6 +3,7 @@ import talib
 from functools import lru_cache
 
 import numpy as np
+from sklearn.preprocessing import MinMaxScaler # <--- ДОБАВЛЕНО: Импорт MinMaxScaler
 
 # --- Helper functions for pattern features from info-4-patterns.md ---
 
@@ -57,6 +58,29 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         df.dropna(subset=numeric_cols, inplace=True)
         if df.empty:
             return pd.DataFrame()
+
+        # =====================================================================
+        # НОВЫЙ БЛОК: МАСШТАБИРОВАНИЕ ОБЪЕМА
+        # =====================================================================
+        if 'volume' in df.columns and not df['volume'].empty:
+            # Создаем MinMaxScaler для колонки 'volume' с диапазоном от 0 до 100
+            scaler_volume = MinMaxScaler(feature_range=(0, 100))
+            
+            # Применяем масштабирование. .values.reshape(-1, 1) нужен для работы с одной колонкой.
+            # Создаем новую колонку с масштабированным объемом
+            df['volume_scaled'] = scaler_volume.fit_transform(df[['volume']].values)
+            
+            # Заменим оригинальную колонку 'volume' на масштабированную для дальнейших расчетов
+            df['volume'] = df['volume_scaled']
+            
+            # Удалим временную колонку 'volume_scaled'
+            df.drop(columns=['volume_scaled'], inplace=True, errors='ignore') # errors='ignore' для безопасности
+            print("✅ Объем успешно масштабирован (диапазон 0-100).")
+        else:
+            print("⚠️ Колонка 'volume' отсутствует или пуста, масштабирование объема пропущено.")
+        # =====================================================================
+        # КОНЕЦ НОВОГО БЛОКА
+        # =====================================================================
 
         # --- Calculate specified indicators using TA-Lib ---
         # Create a copy to avoid SettingWithCopyWarning

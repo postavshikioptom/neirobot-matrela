@@ -28,7 +28,8 @@ def configure_gpu_memory():
     else:
         print("⚠️ GPU не найден, будет использоваться CPU")
 
-configure_gpu_memory()
+if __name__ == "__main__":
+    configure_gpu_memory()
 
 # ✅ НАСТРОЙКИ ДЛЯ СОВМЕСТИМОСТИ С РАЗНЫМИ СРЕДАМИ
 # Отключаем XLA если возникают проблемы (можно включить обратно)
@@ -40,6 +41,44 @@ from models.xlstm_rl_model import XLSTMRLModel
 from rl_agent import IntelligentRLAgent
 from trading_env import TradingEnvRL
 from hybrid_decision_maker import HybridDecisionMaker
+from regularization_callback import AntiOverfittingCallback
+from validation_metrics import ValidationMetricsCallback
+
+import tensorflow.keras.backend as K
+
+@tf.keras.utils.register_keras_serializable()
+class CustomFocalLoss(tf.keras.losses.Loss):
+    def __init__(self, gamma=1.0, alpha=0.3, class_weights=None, name='CustomFocalLoss', **kwargs): # ИЗМЕНЕНО: Добавлен **kwargs
+        super().__init__(name=name, **kwargs) # ИЗМЕНЕНО: Передаем **kwargs в super()
+        self.gamma = gamma
+        self.alpha = alpha
+        # Убедимся, что class_weights - это tf.constant
+        if class_weights is None:
+            self.class_weights = tf.constant([1.2, 1.2, 0.8], dtype=tf.float32) # Default weights
+        else:
+            self.class_weights = tf.constant(class_weights, dtype=tf.float32)
+
+    def call(self, y_true, y_pred):
+        epsilon = K.epsilon()
+        y_pred = K.clip(y_pred, epsilon, 1. - epsilon)
+        y_true = tf.cast(y_true, tf.float32)
+
+        # Применяем класс-специфичные веса
+        weights = tf.reduce_sum(self.class_weights * y_true, axis=-1, keepdims=True)
+        
+        cross_entropy = -y_true * K.log(y_pred)
+        loss = self.alpha * K.pow(1 - y_pred, self.gamma) * cross_entropy * weights
+        
+        return K.sum(loss, axis=-1)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'gamma': self.gamma,
+            'alpha': self.alpha,
+            'class_weights': self.class_weights.numpy().tolist(), # Сохраняем как список
+        })
+        return config
 
 def prepare_xlstm_rl_data(data_path, sequence_length=10):
     """
@@ -112,36 +151,45 @@ def prepare_xlstm_rl_data(data_path, sequence_length=10):
         df['future_return'] = (df['close'].shift(-5) - df['close']) / df['close']
         
         # =====================================================================
-        # НОВЫЙ БЛОК: ДИНАМИЧЕСКИЕ ПОРОГИ И ВЗВЕШЕННЫЙ VSA-СКОР
+        # НОВЫЙ КОД - БОЛЕЕ СТРОГИЕ УСЛОВИЯ ДЛЯ BUY/SELL
         # =====================================================================
-        # 1. Динамический порог future_return на основе ATR
-        # Это позволяет уменьшить порог в высоковолатильные периоды и увеличить — в тихие.
-        df['dynamic_future_threshold'] = df['ATR_14'] / df['close'] * 0.8 # СНИЖЕНО с 1.5 до 0.8
-        df['dynamic_future_threshold'] = df['dynamic_future_threshold'].replace([np.inf, -np.inf], np.nan).ffill().fillna(0.0005) # Минимальный порог 0.05% (было 0.1%)
-        
-        # 2. Взвешенное сочетание VSA-сигналов для более гибких условий
-        # Еще больше ослабляем пороги для VSA-сисилы, чтобы больше сигналов проходило
-        df['vsa_buy_score'] = (
-            0.3 * (df['vsa_no_supply'] == 1) +
-            0.3 * (df['vsa_stopping_volume'] == 1) +
-            0.4 * (df['vsa_strength'] > 0.1) # СНИЖЕНО с 0.25 до 0.1
-        )
-        df['vsa_sell_score'] = (
-            0.3 * (df['vsa_no_demand'] == 1) +
-            0.3 * (df['vsa_climactic_volume'] == 1) +
-            0.4 * (df['vsa_strength'] < -0.1) # СНИЖЕНО с -0.25 до -0.1
+        # Увеличиваем пороги для генерации торговых сигналов
+        df['base_threshold'] = 0.008  # Увеличиваем с 0.0005 до 0.008 (0.8%)
+        df['dynamic_threshold'] = np.maximum(
+            df['base_threshold'],
+            (df['ATR_14'] / df['close'] * 1.2).fillna(0.008)  # Увеличиваем множитель
         )
 
-        # BUY: положительная доходность (динамический порог) + взвешенный VSA-скор
-        buy_condition = (
-            (df['future_return'] > df['dynamic_future_threshold']) &
-            (df['vsa_buy_score'] > 0.2) # СНИЖЕНО с 0.3 до 0.2
+        # Более строгие VSA условия
+        df['vsa_buy_strength'] = (
+            0.5 * (df['vsa_no_supply'] == 1) +
+            0.5 * (df['vsa_stopping_volume'] == 1) +
+            0.3 * np.clip(df['vsa_strength'] / 2.0, 0, 1)  # Более строгая нормализация
         )
-        
-        # SELL: отрицательная доходность (динамический порог) + взвешенный VSA-скор
+
+        df['vsa_sell_strength'] = (
+            0.5 * (df['vsa_no_demand'] == 1) +
+            0.5 * (df['vsa_climactic_volume'] == 1) +
+            0.3 * np.clip(-df['vsa_strength'] / 2.0, 0, 1)
+        )
+
+        # Дополнительные технические фильтры
+        strong_trend = df['ADX_14'] > 25
+        high_volume = df['volume_ratio'] > 1.5
+        rsi_extreme_buy = df['RSI_14'] < 30
+        rsi_extreme_sell = df['RSI_14'] > 70
+
+        # БОЛЕЕ СТРОГИЕ условия для BUY/SELL
+        buy_condition = (
+            (df['future_return'] > df['dynamic_threshold']) &
+            (df['vsa_buy_strength'] > 0.6) &  # Увеличиваем порог с 0.2 до 0.6
+            (strong_trend | high_volume | rsi_extreme_buy)  # Дополнительное подтверждение
+        )
+
         sell_condition = (
-            (df['future_return'] < -df['dynamic_future_threshold']) &
-            (df['vsa_sell_score'] > 0.2) # СНИЖЕНО с 0.3 до 0.2
+            (df['future_return'] < -df['dynamic_threshold']) &
+            (df['vsa_sell_strength'] > 0.6) &  # Увеличиваем порог с 0.2 до 0.6
+            (strong_trend | high_volume | rsi_extreme_sell)  # Дополнительное подтверждение
         )
         # =====================================================================
         # КОНЕЦ НОВОГО БЛОКА
@@ -161,52 +209,47 @@ def prepare_xlstm_rl_data(data_path, sequence_length=10):
         current_hold_count = (df['target'] == 2).sum()
 
         # =====================================================================
-        # НОВЫЙ БЛОК: УЛУЧШЕННАЯ ПЕРЕКЛАССИФИКАЦИЯ HOLD-СИГНАЛОВ
+        # НОВЫЙ КОД - УМЕНЬШАЕМ ПЕРЕКЛАССИФИКАЦИЮ
         # =====================================================================
-        if current_hold_count > (current_buy_count + current_sell_count) * 1.5: # Если HOLD в 1.5+ раза больше
-            print(f"⚠️ Сильный дисбаланс классов. Попытка УМНОЙ переклассификации части HOLD-сигналов.")
-            hold_indices = df[df['target'] == 2].index
+        # Теперь НЕ переклассифицируем, если HOLD составляет меньше 70%
+        if current_hold_count < (current_buy_count + current_sell_count) * 2.0:  # Если HOLD < 66%
+            print(f"⚠️ Слишком мало HOLD сигналов. ДОБАВЛЯЕМ HOLD вместо переклассификации.")
             
+            # Вместо переклассификации HOLD в BUY/SELL, делаем обратное
+            # Переклассифицируем часть слабых BUY/SELL в HOLD
+            
+            weak_buy_indices = df[
+                (df['target'] == 0) &
+                (df['vsa_buy_strength'] < 0.4) &  # Слабые VSA сигналы
+                (df['RSI_14'] > 35) & (df['RSI_14'] < 65)  # RSI в нейтральной зоне
+            ].index
+            
+            weak_sell_indices = df[
+                (df['target'] == 1) &
+                (df['vsa_sell_strength'] < 0.4) &  # Слабые VSA сигналы
+                (df['RSI_14'] > 35) & (df['RSI_14'] < 65)  # RSI в нейтральной зоне
+            ].index
+            
+            # Переклассифицируем 30% слабых сигналов в HOLD
             import random
-            random.seed(42) # Для воспроизводимости
+            random.seed(42)
             
-            # Переклассифицируем 40% HOLD (было 30%)
-            reclassify_count = int(current_hold_count * 0.40) # УВЕЛИЧЕНО до 40%
-            if reclassify_count > 0:
-                reclassify_indices = random.sample(list(hold_indices), min(reclassify_count, len(hold_indices)))
-                
-                for idx in reclassify_indices:
-                    if idx < 1: continue
-                    
-                    rsi = df.loc[idx, 'RSI_14']
-                    adx = df.loc[idx, 'ADX_14']
-                    adx_prev = df.loc[idx-1, 'ADX_14']
-                    price_change_5_period = df['close'].pct_change(5).loc[idx]
-                    atr_ratio = df.loc[idx, 'ATR_14'] / df.loc[idx, 'close']
-                    
-                    # Условия для переклассификации (ЕЩЕ БОЛЕЕ МЯГКИЕ)
-                    # 1. Слабый RSI + растущий ADX + небольшое движение → BUY
-                    if (rsi < 45 and adx > adx_prev and abs(price_change_5_period) > 0.0005): # RSI < 45 (было 40), price_change_5_period > 0.0005 (было 0.001)
-                        df.loc[idx, 'target'] = 0  # BUY
-
-                    # 2. RSI > 55 + растущий ADX + небольшое движение → SELL
-                    elif (rsi > 55 and adx > adx_prev and abs(price_change_5_period) > 0.0005): # RSI > 55 (было 60), price_change_5_period < -0.0005 (было -0.001)
-                        df.loc[idx, 'target'] = 1  # SELL
-
-                    # 3. Подтверждение по объему (слабый объем, но есть движение)
-                    elif (df['volume'].loc[idx] > df['volume'].rolling(20).quantile(0.6).loc[idx] and # Квантиль 0.6 (было 0.7)
-                        ((price_change_5_period > 0.0005 and rsi < 50) or (price_change_5_period < -0.0005 and rsi > 50))): # RSI < 50 / > 50
-                        df.loc[idx, 'target'] = 0 if price_change_5_period > 0 else 1
-
-                    # 4. Смена тренда: ADX растет, RSI отходит от 50
-                    elif (abs(rsi - 50) > 3 and adx > adx_prev and abs(adx - adx_prev) > 0.3): # abs(rsi-50) > 3 (было 5), abs(adx-adx_prev) > 0.3 (было 0.5)
-                        df.loc[idx, 'target'] = 0 if rsi < 50 else 1 # Сделаем более агрессивным
+            if len(weak_buy_indices) > 0:
+                reclassify_buy = random.sample(
+                    list(weak_buy_indices),
+                    min(int(len(weak_buy_indices) * 0.3), len(weak_buy_indices))
+                )
+                df.loc[reclassify_buy, 'target'] = 2  # Переводим в HOLD
             
-            print(f"Баланс классов после УМНОЙ переклассификации:")
-            unique, counts = np.unique(df['target'], return_counts=True)
-            class_names = ['BUY', 'SELL', 'HOLD']
-            for class_idx, count in zip(unique, counts):
-                print(f"  {class_names[class_idx]}: {count} ({count/len(df)*100:.1f}%)")
+            if len(weak_sell_indices) > 0:
+                reclassify_sell = random.sample(
+                    list(weak_sell_indices),
+                    min(int(len(weak_sell_indices) * 0.3), len(weak_sell_indices))
+                )
+                df.loc[reclassify_sell, 'target'] = 2  # Переводим в HOLD
+
+        else:
+            print(f"✅ Баланс классов приемлемый, переклассификация не нужна.")
         # =====================================================================
         # КОНЕЦ НОВОГО БЛОКА
         # =====================================================================
@@ -266,9 +309,10 @@ def prepare_xlstm_rl_data(data_path, sequence_length=10):
         # (предполагаем, что общее число примеров будет около len(X) * (1 + oversampling_ratio))
         
         # Рассчитываем целевые количества на основе общего числа примеров
+        # Целевое соотношение: 20% BUY, 20% SELL, 60% HOLD (более агрессивный oversampling)
         total_samples = len(X)
-        target_buy_count = int(total_samples * 0.25) # Цель 25% BUY
-        target_sell_count = int(total_samples * 0.25) # Цель 25% SELL
+        target_buy_count = int(total_samples * 0.20)  # ИЗМЕНЕНО: с 0.10 до 0.20
+        target_sell_count = int(total_samples * 0.20) # ИЗМЕНЕНО: с 0.10 до 0.20
         
         current_buy_count = Counter(y_labels)[0]
         current_sell_count = Counter(y_labels)[1]
@@ -282,7 +326,6 @@ def prepare_xlstm_rl_data(data_path, sequence_length=10):
             k_neighbors = min(5,
                               (current_buy_count - 1 if current_buy_count > 1 else 1),
                               (current_sell_count - 1 if current_sell_count > 1 else 1))
-            # Убедимся, что k_neighbors не меньше 1
             k_neighbors = max(1, k_neighbors)
 
             if any(count <= k_neighbors for count in [current_buy_count, current_sell_count] if count > 0):
@@ -293,14 +336,14 @@ def prepare_xlstm_rl_data(data_path, sequence_length=10):
                 oversampler = SMOTE(sampling_strategy=sampling_strategy_smote, random_state=42, k_neighbors=k_neighbors)
 
             X_temp, y_temp_labels = oversampler.fit_resample(X.reshape(len(X), -1), y_labels)
-            print(f"Баланс классов после Oversampling: {Counter(y_temp_labels)}")
+            print(f"Баланс классов после Oversampling: {Counter(y_temp_labels)} (BUY/SELL увеличены)")
         else:
             X_temp, y_temp_labels = X.reshape(len(X), -1), y_labels
             print("Пропустил Oversampling, так как нет BUY/SELL сигналов.")
 
-        # Undersampling HOLD: Цель - чтобы HOLD был примерно равен сумме BUY + SELL
+        # Undersampling HOLD: Цель - чтобы HOLD был примерно в 1.5 раза больше, чем сумма BUY + SELL
         current_hold_count_after_oversample = Counter(y_temp_labels)[2]
-        target_hold_count = min(current_hold_count_after_oversample, int((Counter(y_temp_labels)[0] + Counter(y_temp_labels)[1]) * 1.0)) # СНИЖЕНО с 1.5 до 1.0
+        target_hold_count = min(current_hold_count_after_oversample, int((Counter(y_temp_labels)[0] + Counter(y_temp_labels)[1]) * 1.5)) # ИЗМЕНЕНО: с 3.0 до 1.5
         
         undersampler = RandomUnderSampler(sampling_strategy={2: target_hold_count}, random_state=42)
         X_resampled, y_resampled_labels = undersampler.fit_resample(X_temp, y_temp_labels)
@@ -344,23 +387,43 @@ def train_xlstm_rl_system(X, y, processed_dfs, feature_cols):
     os.makedirs('models', exist_ok=True)
     
     # =====================================================================
-    # НОВЫЙ БЛОК: TIME SERIES SPLIT ДЛЯ ВАЛИДАЦИИ
     # =====================================================================
-    from sklearn.model_selection import TimeSeriesSplit
+    # НОВЫЙ БЛОК: УЛУЧШЕННЫЙ TIME SERIES SPLIT
+    # =====================================================================
+    from sklearn.model_selection import StratifiedKFold # ИЗМЕНЕНО: Используем StratifiedKFold
+    from collections import Counter
 
-    print("\n🔄 Применяю TimeSeriesSplit для валидации данных...")
-    # Используем одну складку для простоты, последняя часть для теста, предпоследняя для валидации
-    # Количество сплитов = 2, чтобы получить 3 части: Train, Val, Test (в последнем сплите)
-    tscv = TimeSeriesSplit(n_splits=2)
+    print("\n🔄 Применяю СТРАТИФИЦИРОВАННЫЙ TimeSeriesSplit для валидации данных...")
 
-    train_val_indices, test_indices = list(tscv.split(X))[0] # Первый сплит: Train/Val vs Test
-    train_indices, val_indices = list(tscv.split(X[train_val_indices]))[0] # Второй сплит: Train vs Val
+    # Сначала отделим тестовую выборку (последние 20% данных)
+    test_size = int(len(X) * 0.2)
+    X_temp, X_test = X[:-test_size], X[-test_size:]
+    y_temp, y_test = y[:-test_size], y[-test_size:]
 
-    X_train, y_train = X[train_indices], y[train_indices]
-    X_val, y_val = X[val_indices], y[val_indices]
-    X_test, y_test = X[test_indices], y[test_indices] # Test берем из первого сплита
+    # Для тренировочной и валидационной выборки используем StratifiedKFold,
+    # чтобы обеспечить наличие всех классов в каждом сплите.
+    # Мы не можем использовать TimeSeriesSplit со стратификацией напрямую,
+    # поэтому имитируем его, беря последние данные для валидации.
+    n_splits_stratified = 5 # ИЗМЕНЕНО: Используем 5 сплитов для лучшего распределения
+    skf = StratifiedKFold(n_splits=n_splits_stratified, shuffle=False) # shuffle=False для сохранения временного порядка
 
-    print(f"✅ TimeSeriesSplit завершен.")
+    train_indices_list = []
+    val_indices_list = []
+
+    # Сохраняем метки классов для стратификации
+    y_temp_labels = np.argmax(y_temp, axis=1)
+
+    for train_idx, val_idx in skf.split(X_temp, y_temp_labels): # ИЗМЕНЕНО: Используем y_temp_labels для стратификации
+        train_indices_list.append(train_idx)
+        val_indices_list.append(val_idx)
+
+    # Берем последний сплит для тренировки и валидации, чтобы сохранить "временной" аспект
+    X_train, y_train = X_temp[train_indices_list[-1]], y_temp[train_indices_list[-1]]
+    X_val, y_val = X_temp[val_indices_list[-1]], y_temp[val_indices_list[-1]]
+
+    print(f"✅ Стратифицированный TimeSeriesSplit завершен.")
+    print(f"Распределение классов в X_train: {Counter(np.argmax(y_train, axis=1))}")
+    print(f"Распределение классов в X_val: {Counter(np.argmax(y_val, axis=1))}")
     # =====================================================================
     # КОНЕЦ НОВОГО БЛОКА
     # =====================================================================
@@ -377,14 +440,21 @@ def train_xlstm_rl_system(X, y, processed_dfs, feature_cols):
     )
     class_weight_dict = {i: class_weights_array[i] for i in range(len(class_weights_array))}
 
-    # Дополнительное усиление весов BUY/SELL
-    additional_weight_multiplier = 1.5
+    # НОВЫЙ КОД - БАЛАНСИРУЕМ ВЕСА ПРАВИЛЬНО
+    # Проблема: HOLD имеет слишком низкий recall, нужно УВЕЛИЧИТЬ его вес
+    
+    # Увеличиваем веса BUY/SELL немного, чтобы модель уделяла им больше внимания,
+    # но не настолько, чтобы она полностью игнорировала HOLD.
+    # Уменьшаем вес HOLD, но не слишком сильно.
     if 0 in class_weight_dict:
-        class_weight_dict[0] *= additional_weight_multiplier
+        class_weight_dict[0] *= 1.5  # ИЗМЕНЕНО: Увеличиваем вес BUY
     if 1 in class_weight_dict:
-        class_weight_dict[1] *= additional_weight_multiplier
-
-    print(f"📊 Веса классов для обучения: {class_weight_dict}")
+        class_weight_dict[1] *= 1.5  # ИЗМЕНЕНО: Увеличиваем вес SELL
+    
+    if 2 in class_weight_dict:
+        class_weight_dict[2] *= 0.7  # ИЗМЕНЕНО: Уменьшаем вес HOLD
+    
+    print(f"📊 ИСПРАВЛЕННЫЕ веса классов: {class_weight_dict}")
     # =====================================================================
     # КОНЕЦ НОВОГО БЛОКА
     # =====================================================================
@@ -409,15 +479,42 @@ def train_xlstm_rl_system(X, y, processed_dfs, feature_cols):
         X_test = np.nan_to_num(X_test, nan=0.0, posinf=0.0, neginf=0.0)
         print("✅ NaN/Inf исправлены")
         
-    # Проверяем, есть ли сохраненная модель
-    checkpoint_path = 'models/xlstm_checkpoint_latest.keras'
-    scaler_path = 'models/xlstm_rl_scaler.pkl'
-
+    # =====================================================================
+    # НОВЫЙ БЛОК: ИНИЦИАЛИЗАЦИЯ/ЗАГРУЗКА МОДЕЛИ
+    # =====================================================================
     xlstm_model = XLSTMRLModel(
         input_shape=(X_train.shape[1], X_train.shape[2]),
         memory_units=128,
         attention_units=64
     )
+    xlstm_model.build_model() # <--- СНАЧАЛА СТРОИМ МОДЕЛЬ!
+
+    checkpoint_path = 'models/xlstm_checkpoint_latest.keras'
+    scaler_path = 'models/xlstm_rl_scaler.pkl'
+
+    if os.path.exists(checkpoint_path):
+        print("Найдена сохраненная модель, загружаем веса...")
+        try:
+            # Загружаем только веса, так как архитектура уже построена
+            xlstm_model.model.load_weights(checkpoint_path) # <--- ИЗМЕНЕНО: load_weights вместо load_model
+            
+            # Загружаем scaler если он существует
+            if os.path.exists(scaler_path):
+                with open(scaler_path, 'rb') as f:
+                    xlstm_model.scaler = pickle.load(f)
+                xlstm_model.is_trained = True
+                print("✅ Веса модели и scaler загружены, продолжаем обучение")
+            else:
+                print("⚠️ Scaler не найден, будет использован новый")
+                
+        except Exception as e:
+            print(f"⚠️ Не удалось загрузить веса модели: {e}, начинаем обучение с нуля.")
+            # В этом случае модель останется с инициализированными весами, что и нужно.
+    else:
+        print("Нет сохраненной модели, начинаем обучение с нуля.")
+    # =====================================================================
+    # КОНЕЦ НОВОГО БЛОКА
+    # =====================================================================
 
     # Нормализация данных
     X_train_reshaped = X_train.reshape(-1, X_train.shape[-1])
@@ -427,6 +524,7 @@ def train_xlstm_rl_system(X, y, processed_dfs, feature_cols):
 
     # =====================================================================
     # НОВЫЙ БЛОК: ИНЪЕКЦИЯ ШУМА ВО ВХОДНЫЕ ПРИЗНАКИ (для регуляризации)
+    # Этот блок теперь находится СРАЗУ ПОСЛЕ определения X_train_scaled и X_val_scaled
     # =====================================================================
     print("\n шумовые входные данные...")
     # Добавляем шум только к тренировочной выборке
@@ -447,37 +545,28 @@ def train_xlstm_rl_system(X, y, processed_dfs, feature_cols):
     # =====================================================================
     # КОНЕЦ НОВОГО БЛОКА
     # =====================================================================
-    
-    if os.path.exists(checkpoint_path):
-        print("Найдена сохраненная модель, загружаем...")
-        try:
-            # ИСПРАВЛЕНО: Загружаем модель и scaler
-            xlstm_model.model = tf.keras.models.load_model(checkpoint_path)
-            
-            # Загружаем scaler если он существует
-            if os.path.exists(scaler_path):
-                with open(scaler_path, 'rb') as f:
-                    # Перезагружаем scaler, так как он мог быть не сохранен с моделью
-                    xlstm_model.scaler = pickle.load(f)
-                xlstm_model.is_trained = True
-                print("✅ Модель и scaler загружены, продолжаем обучение")
-            else:
-                print("⚠️ Scaler не найден, будет использован новый")
-                
-        except Exception as e:
-            print(f"⚠️ Не удалось загрузить модель: {e}, начинаем заново")
-            # Модель уже инициализирована, ничего не делаем
-    
-    # Градиентное обрезание для стабильности
+
+    # Теперь xlstm_model.model гарантированно не None, можно компилировать
+    # НОВЫЙ КОД - Инициализация Learning Rate как float
     optimizer = tf.keras.optimizers.Adam(
-        learning_rate=0.001,
-        clipnorm=1.0
+        learning_rate=0.0005,  # ИЗМЕНЕНО: Возвращаем float literal
+        clipnorm=0.5,
+        weight_decay=0.0001
     )
-    xlstm_model.model.compile( # ИЗМЕНЕНО: теперь используем xlstm_model.model напрямую
+    xlstm_model.model.compile(
         optimizer=optimizer,
-        # ИЗМЕНЕНО: Добавляем Label Smoothing
-        loss=tf.keras.losses.CategoricalCrossentropy(label_smoothing=0.1), # <--- ИЗМЕНЕНО
-        metrics=['accuracy', 'precision', 'recall']
+        loss=CustomFocalLoss(gamma=1.0, alpha=0.3, class_weights=[1.2, 1.2, 0.8]), # ИЗМЕНЕНО: Используем класс
+        metrics=[
+            'accuracy',
+            tf.keras.metrics.Precision(name='precision'),
+            tf.keras.metrics.Recall(name='recall'),
+            tf.keras.metrics.Precision(name='precision_0', class_id=0),
+            tf.keras.metrics.Precision(name='precision_1', class_id=1),
+            tf.keras.metrics.Precision(name='precision_2', class_id=2),
+            tf.keras.metrics.Recall(name='recall_0', class_id=0),
+            tf.keras.metrics.Recall(name='recall_1', class_id=1),
+            tf.keras.metrics.Recall(name='recall_2', class_id=2),
+        ]
     )
 
     # ДОБАВЬТЕ: Кастомные колбэки для мониторинга и очистки памяти
@@ -495,10 +584,20 @@ def train_xlstm_rl_system(X, y, processed_dfs, feature_cols):
             try:
                 lr = self.model.optimizer.learning_rate.numpy()
                 # ИЗМЕНЕНО: Добавлены метрики accuracy, precision, recall
+                # ИЗМЕНЕНО: Добавлены метрики accuracy, precision, recall
                 print(f"Эпоха {epoch+1}/100 - loss: {logs.get('loss', 0):.4f} - val_loss: {logs.get('val_loss', 0):.4f} - "
-                      f"accuracy: {logs.get('accuracy', 0):.2f} - val_accuracy: {logs.get('val_accuracy', 0):.2f} - " # <--- ДОБАВЛЕНО
-                      f"precision: {logs.get('precision', 0):.2f} - val_precision: {logs.get('val_precision', 0):.2f} - " # <--- ДОБАВЛЕНО
-                      f"recall: {logs.get('recall', 0):.2f} - val_recall: {logs.get('val_recall', 0):.2f} - lr: {lr:.2e}") # <--- ДОБАВЛЕНО
+                      f"accuracy: {logs.get('accuracy', 0):.2f} - val_accuracy: {logs.get('val_accuracy', 0):.2f} - "
+                      f"precision: {logs.get('precision', 0):.2f} - val_precision: {logs.get('val_precision', 0):.2f} - "
+                      f"recall: {logs.get('recall', 0):.2f} - val_recall: {logs.get('val_recall', 0):.2f} - lr: {lr:.2e}")
+            
+                # ДОБАВЛЕНО: Вывод метрик по классам (если доступны)
+                # Это будет полезно для диагностики
+                if 'precision_0' in logs:
+                    print(f"  Class 0 (BUY): Prec={logs.get('precision_0', 0):.2f}, Rec={logs.get('recall_0', 0):.2f}")
+                if 'precision_1' in logs:
+                    print(f"  Class 1 (SELL): Prec={logs.get('precision_1', 0):.2f}, Rec={logs.get('recall_1', 0):.2f}")
+                if 'precision_2' in logs:
+                    print(f"  Class 2 (HOLD): Prec={logs.get('precision_2', 0):.2f}, Rec={logs.get('recall_2', 0):.2f}")
                 
                 # Проверяем на переобучение
                 if logs.get('val_loss', 0) > logs.get('loss', 0) * 2:
@@ -509,27 +608,31 @@ def train_xlstm_rl_system(X, y, processed_dfs, feature_cols):
     callbacks = [
         tf.keras.callbacks.EarlyStopping(
             monitor='val_loss',
-            patience=20,  # <--- ИЗМЕНЕНО с 35 на 20 (более агрессивный стоп)
+            mode='min',
+            patience=15,
             restore_best_weights=True,
-            verbose=1
+            verbose=1,
+            min_delta=0.001
         ),
+        AntiOverfittingCallback(patience=8, min_improvement=0.005),  # НОВЫЙ КОЛБЭК
         MemoryCleanupCallback(),
         DetailedProgressCallback(),
         tf.keras.callbacks.ReduceLROnPlateau(
             monitor='val_loss',
-            factor=0.5,
-            patience=20,
-            min_lr=1e-7,
-            verbose=0
-        )
+            factor=0.7,
+            patience=8,
+            min_lr=1e-6,
+            verbose=1
+        ),
+        ValidationMetricsCallback(X_val_to_model, y_val),  # НОВЫЙ КОЛБЭК
     ]
 
     # Обучение с улучшенными колбэками
     history = xlstm_model.train(
         X_train_to_model, y_train, # <--- ИЗМЕНЕНО: используем X_train_to_model
         X_val_to_model, y_val,     # <--- ИЗМЕНЕНО: используем X_val_to_model
-        epochs=100,
-        batch_size=16,
+        epochs=80,      # Уменьшаем количество эпох с 100 до 80
+        batch_size=32,  # Увеличиваем batch_size с 16 до 32
         class_weight=class_weight_dict,
         custom_callbacks=callbacks
     )
@@ -544,10 +647,24 @@ def train_xlstm_rl_system(X, y, processed_dfs, feature_cols):
     # Оценка xLSTM
     try:
         X_test_scaled = xlstm_model.scaler.transform(X_test.reshape(-1, X_test.shape[-1])).reshape(X_test.shape)
-        loss, accuracy, precision, recall = xlstm_model.model.evaluate(X_test_scaled, y_test, verbose=0)
+        # НОВЫЙ КОД - Использование model.evaluate с return_dict=True
+        evaluation_results_dict = xlstm_model.model.evaluate(X_test_scaled, y_test, verbose=0, return_dict=True) # ИЗМЕНЕНО: return_dict=True
+
+        loss = evaluation_results_dict.get('loss', 0.0)
+        accuracy = evaluation_results_dict.get('accuracy', 0.0)
+        precision = evaluation_results_dict.get('precision', 0.0)
+        recall = evaluation_results_dict.get('recall', 0.0)
+
+        print(f"xLSTM Loss: {loss:.4f}")
         print(f"xLSTM Точность: {accuracy * 100:.2f}%")
         print(f"xLSTM Precision: {precision * 100:.2f}%")
         print(f"xLSTM Recall: {recall * 100:.2f}%")
+
+        # Выводим метрики по классам, если они есть
+        for i, class_name in enumerate(['BUY', 'SELL', 'HOLD']):
+            prec_i = evaluation_results_dict.get(f'precision_{i}', 0.0)
+            rec_i = evaluation_results_dict.get(f'recall_{i}', 0.0)
+            print(f"  Class {i} ({class_name}): Prec={prec_i:.2f}, Rec={rec_i:.2f}")
     except Exception as e:
         print(f"⚠️ Ошибка при оценке модели: {e}")
     
@@ -560,9 +677,9 @@ def train_xlstm_rl_system(X, y, processed_dfs, feature_cols):
     regime_training_df = pd.concat(list(processed_dfs.values())).reset_index(drop=True)
     decision_maker_temp = HybridDecisionMaker(
         xlstm_model_path='models/xlstm_rl_model.keras',
-        rl_agent_path='models/rl_agent_BTCUSDT', # Временно, он не будет использоваться для принятия решений
+        rl_agent_path=None,  # <--- ИЗМЕНЕНО: Передаем None, так как RL агент еще не обучен
         feature_columns=feature_cols,
-        sequence_length=X.shape[1] # Передаем sequence_length
+        sequence_length=X.shape[1]
     )
     decision_maker_temp.fit_regime_detector(regime_training_df, xlstm_model, feature_cols)
     decision_maker_temp.regime_detector.save_detector('models/market_regime_detector.pkl')

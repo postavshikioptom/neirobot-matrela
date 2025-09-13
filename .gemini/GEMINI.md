@@ -68,6 +68,7 @@ python run_live_trading.py
 
 python trade_statistics.py - показывает всю статистику модели за последние 100 сделок на Bybit торговле
 python lime_analytics.py - аналитика отдельных сделок по логам торгов. Запускать отдельно после обучения.
+РАЗ В НЕДЕЛЮ ОБУЧАТь на новых исторических данных свечей (старые весы храняться, а на новых данных их чуть корректирует)
 python train_model.py - обучение matrela
 python train_model.py --model all  - обучение LSTM и xLSTM
 python train_model.py --model xlstm_indicator - обучение только одной модели
@@ -80,7 +81,7 @@ python run_simulation.py --symbol ALGOUSDT --mode LSTM_only
 
 python test_patterns.py - проверка паттернов на работоспособность
 
-РАЗ В НЕДЕЛЮ ОБУЧАТь на новых исторических данных свечей
+
 
 
 
@@ -117,8 +118,6 @@ MACD (Moving Average Convergence Divergence)
 ADX (Average Directional Index)
 Стохастик
 
-Паттерны от дмитиря:
-молот, поглощение, луна, солнце(Marubozu) в обе стороны
 
 # Паттерны 
  Молот, Поглощение, Доджи, Падающая звезда, висельник, солнце(Marubozu) 	убрал - 3 Черные вороны

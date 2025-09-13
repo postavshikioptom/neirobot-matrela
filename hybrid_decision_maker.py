@@ -15,7 +15,10 @@ class HybridDecisionMaker:
         self.xlstm_model.load_model(xlstm_model_path, 'models/xlstm_rl_scaler.pkl')
         
         self.rl_agent = IntelligentRLAgent()
-        self.rl_agent.load_agent(rl_agent_path)
+        if rl_agent_path: # <--- ДОБАВЛЕНО: Проверяем, существует ли путь
+            self.rl_agent.load_agent(rl_agent_path)
+        else:
+            print("⚠️ RL агент не загружен, так как путь не указан (возможно, еще не обучен).")
         
         self.feature_columns = feature_columns
         self.decision_history = []
