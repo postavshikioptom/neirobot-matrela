@@ -31,20 +31,24 @@ STOP_LOSS_PCT = -1.0   # Уменьшили SL
 CONFIDENCE_THRESHOLD = 0.65  # Повысили порог уверенности
 #SEQUENCE_LENGTH = 10
 
-# === НОВЫЕ КОЛОНКИ ПРИЗНАКОВ С VSA ===
+# 🔥 НОВЫЕ FEATURE_COLUMNS - ТОЛЬКО ИНДИКАТОРЫ
 FEATURE_COLUMNS = [
-    # Технические индикаторы
-    'RSI_14', 'MACD_12_26_9', 'BBL_20_2.0', 'BBM_20_2.0', 'BBU_20_2.0',
+    # ✅ ВСЕ ТЕХНИЧЕСКИЕ ИНДИКАТОРЫ (БЕЗ БОЛЛИНДЖЕРА И ATR_14)
+    'RSI_14', 'MACD_12_26_9', 'MACD_signal', 'MACD_hist',
     'ADX_14', 'STOCHk_14_3_3', 'STOCHd_14_3_3',
-    'ATR_14', # <--- ДОБАВЛЕНО
-    # Паттерны
-    'CDLHAMMER', 'CDLENGULFING', 'CDLDOJI', 'CDLSHOOTINGSTAR',
-    'CDLHANGINGMAN', 'CDLMARUBOZU',
-    # VSA признаки
-    'vsa_no_demand', 'vsa_no_supply', 'vsa_stopping_volume',
-    'vsa_climactic_volume', 'vsa_test', 'vsa_effort_vs_result', 'vsa_strength',
-    # Дополнительные рыночные данные
-    'volume_ratio', 'spread_ratio', 'close_position'
+    'WILLR_14', # 🔥 НОВЫЙ ИНДИКАТОР
+    'AO_5_34',  # 🔥 НОВЫЙ ИНДИКАТОР
+    
+    # ❌ ВСЕ ПАТТЕРНЫ ЗАКОММЕНТИРОВАНЫ
+    # 'CDLHAMMER', 'CDLENGULFING', 'CDLDOJI', 'CDLSHOOTINGSTAR',
+    # 'CDLHANGINGMAN', 'CDLMARUBOZU',
+    # 'CDLINVERTEDHAMMER', 'CDLDRAGONFLYDOJI', 'CDLBELTHOLD',
+    # 'hammer_f', 'hangingman_f', 'engulfing_f', 'doji_f',
+    # 'shootingstar_f', 'bullish_marubozu_f',
+    # 'inverted_hammer_f', 'dragonfly_doji_f', 'bullish_pin_bar_f', 'bullish_belt_hold_f',
+    
+    # ✅ ОСТАВЛЯЕМ EVENT SAMPLING
+    'is_event'
 ]
 
 opened_trades_counter = 0
@@ -105,8 +109,8 @@ def manage_active_positions(session, decision_maker):
             
             # === НОВАЯ ОБРАБОТКА С VSA ===
             features_df = feature_engineering.calculate_features(kline_df.copy())
-            features_df = feature_engineering.detect_candlestick_patterns(features_df)
-            features_df = feature_engineering.calculate_vsa_features(features_df)  # Добавляем VSA!
+            # features_df = feature_engineering.detect_candlestick_patterns(features_df) # 🔥 ЗАКОММЕНТИРОВАНО
+            # features_df = feature_engineering.calculate_vsa_features(features_df)  # <--- ЗАКОММЕНТИРОВАНО
             
             if features_df.empty or len(features_df) < config.SEQUENCE_LENGTH:
                 continue
@@ -149,10 +153,10 @@ def manage_active_positions(session, decision_maker):
                 should_close = True
                 close_reason = f"MODEL_SIGNAL ({decision})"
             
-            # 3. VSA сигнал на закрытие (новая логика!)
-            elif should_close_by_vsa(features_df.iloc[-1], pos['side']):
-                should_close = True
-                close_reason = "VSA_SIGNAL"
+            # 3. VSA сигнал на закрытие (отключен)
+            # elif should_close_by_vsa(features_df.iloc[-1], pos['side']): # <--- ЗАКОММЕНТИРОВАНО
+            #     should_close = True
+            #     close_reason = "VSA_SIGNAL"
             
             if should_close:
                 print(f"!!! {symbol}: {close_reason}. Закрываю позицию... !!!")
@@ -177,26 +181,6 @@ def manage_active_positions(session, decision_maker):
                 del current_positions[symbol]
         save_active_positions(current_positions)
 
-def should_close_by_vsa(row, position_side):
-    """Определяет, нужно ли закрывать позицию на основе VSA сигналов"""
-    
-    if position_side == 'BUY':
-        # Закрываем лонг при медвежьих VSA сигналах
-        return (
-            row['vsa_no_demand'] == 1 or 
-            row['vsa_climactic_volume'] == 1 or 
-            (row['vsa_strength'] < -2 and row['volume_ratio'] > 1.5)
-        )
-    
-    elif position_side == 'SELL':
-        # Закрываем шорт при бычьих VSA сигналах
-        return (
-            row['vsa_no_supply'] == 1 or 
-            row['vsa_stopping_volume'] == 1 or 
-            (row['vsa_strength'] > 2 and row['volume_ratio'] > 1.5)
-        )
-    
-    return False
 
 @error_handler
 def process_new_signal(session, symbol, decision_maker):
@@ -229,8 +213,8 @@ def process_new_signal(session, symbol, decision_maker):
         
         # === ПОЛНАЯ ОБРАБОТКА С VSA ===
         features_df = feature_engineering.calculate_features(kline_df.copy())
-        features_df = feature_engineering.detect_candlestick_patterns(features_df)
-        features_df = feature_engineering.calculate_vsa_features(features_df)
+        # features_df = feature_engineering.detect_candlestick_patterns(features_df) # 🔥 ЗАКОММЕНТИРОВАНО
+        # features_df = feature_engineering.calculate_vsa_features(features_df) # <--- ЗАКОММЕНТИРОВАНО
         
         if features_df.empty or len(features_df) < config.SEQUENCE_LENGTH:
             return
@@ -246,79 +230,42 @@ def process_new_signal(session, symbol, decision_maker):
             print(explanation)
 
         if decision in ['BUY', 'SELL']:
-            # Дополнительная проверка VSA подтверждения
-            if validate_decision_with_vsa(features_df.iloc[-1], decision):
-                open_result = trade_manager.open_market_position(session, decision, symbol)
-                
-                if open_result.get('status') == 'SUCCESS':
-                    performance_monitor.log_trade_opened(symbol, decision, vsa_confirmed=True)
-                    # Логируем с полной информацией
-                    notification_system.send_trade_alert(symbol, "OPEN", open_result['price'], reason=f"VSA_CONFIRMED_{decision}")
-                    trade_logger.log_enhanced_trade_with_quality_metrics(symbol, 'OPEN', open_result, None, 0,
-                                     decision_maker, features_df.iloc[-1], f"VSA_CONFIRMED_{decision}")
-                    
-                    # Сохраняем позицию
-                    active_positions = load_active_positions()
-                    active_positions[symbol] = {
-                        'side': decision,
-                        'entry_price': open_result['price'],
-                        'quantity': open_result['quantity'],
-                        'timestamp': time.time(),
-                        'duration': 0,
-                        'vsa_entry_strength': features_df.iloc[-1]['vsa_strength']  # Сохраняем VSA силу входа
-                    }
-                    save_active_positions(active_positions)
-                    
-                    opened_trades_counter += 1
-                    print(f"✅ Сделка #{opened_trades_counter}/{OPEN_TRADE_LIMIT} открыта с VSA подтверждением.")
-                    
-                    if opened_trades_counter >= OPEN_TRADE_LIMIT:
-                        print("!!! ДОСТИГНУТ ЛИМИТ ОТКРЫТЫХ СДЕЛОК !!!")
-                        set_trader_status('MANAGING_ONLY')
-            else:
-                print(f"❌ VSA не подтверждает решение {decision} для {symbol}")
+            # НОВЫЙ КОД - Открытие сделки без VSA подтверждения
+    # Дополнительная проверка VSA подтверждения (отключена)
+    # if validate_decision_with_vsa(features_df.iloc[-1], decision): # <--- ЗАКОММЕНТИРОВАНО
+            open_result = trade_manager.open_market_position(session, decision, symbol)
+    
+            if open_result.get('status') == 'SUCCESS':
+                performance_monitor.log_trade_opened(symbol, decision, vsa_confirmed=False) # ИЗМЕНЕНО: vsa_confirmed=False
+        # Логируем с полной информацией
+                notification_system.send_trade_alert(symbol, "OPEN", open_result['price'], reason=f"MODEL_DECISION_{decision}") # ИЗМЕНЕНО: Причина
+                trade_logger.log_enhanced_trade_with_quality_metrics(symbol, 'OPEN', open_result, None, 0,
+                                 decision_maker, features_df.iloc[-1], f"MODEL_DECISION_{decision}") # ИЗМЕНЕНО: Причина
+        
+        # Сохраняем позицию
+                active_positions = load_active_positions()
+                active_positions[symbol] = {
+                    'side': decision,
+                    'entry_price': open_result['price'],
+                    'quantity': open_result['quantity'],
+                    'timestamp': time.time(),
+                    'duration': 0,
+            # 'vsa_entry_strength': features_df.iloc[-1]['vsa_strength']  # <--- УДАЛЕНО: VSA сила входа
+                }
+                save_active_positions(active_positions)
+        
+                opened_trades_counter += 1
+                print(f"✅ Сделка #{opened_trades_counter}/{OPEN_TRADE_LIMIT} открыта на основе решения модели.") # ИЗМЕНЕНО: Сообщение
+        
+                if opened_trades_counter >= OPEN_TRADE_LIMIT:
+                    print("!!! ДОСТИГНУТ ЛИМИТ ОТКРЫТЫХ СДЕЛОК !!!")
+                    set_trader_status('MANAGING_ONLY')
+    # else: # <--- УДАЛЕНО: Блок else для VSA подтверждения
+    #     print(f"❌ VSA не подтверждает решение {decision} для {symbol}")
 
     except Exception as e:
         print(f"!!! КРИТИЧЕСКАЯ ОШИБКА при обработке сигнала для {symbol}: {e} !!!")
 
-def validate_decision_with_vsa(row, decision):
-    """Валидирует торговое решение с помощью VSA анализа"""
-    
-    if decision == 'BUY':
-        # Подтверждение покупки через VSA
-        vsa_confirmation = (
-            row['vsa_no_supply'] == 1 or  # Нет предложения
-            row['vsa_stopping_volume'] == 1 or  # Остановочный объем
-            (row['vsa_strength'] > 1 and row['volume_ratio'] > 1.2)  # Общая сила + объем
-        )
-        
-        # Анти-подтверждение (не покупаем)
-        vsa_contradiction = (
-            row['vsa_no_demand'] == 1 or  # Нет спроса
-            row['vsa_climactic_volume'] == 1 or  # Кульминационный объем
-            row['vsa_strength'] < -2  # Сильная медвежья сила
-        )
-        
-        return vsa_confirmation and not vsa_contradiction
-    
-    elif decision == 'SELL':
-        # Подтверждение продажи через VSA
-        vsa_confirmation = (
-            row['vsa_no_demand'] == 1 or  # Нет спроса
-            row['vsa_climactic_volume'] == 1 or  # Кульминационный объем
-            (row['vsa_strength'] < -1 and row['volume_ratio'] > 1.2)  # Медвежья сила + объем
-        )
-        
-        # Анти-подтверждение (не продаем)
-        vsa_contradiction = (
-            row['vsa_no_supply'] == 1 or  # Нет предложения
-            row['vsa_stopping_volume'] == 1 or  # Остановочный объем
-            row['vsa_strength'] > 2  # Сильная бычья сила
-        )
-        
-        return vsa_confirmation and not vsa_contradiction
-    
-    return False
 
 
 def run_trading_loop():
@@ -456,34 +403,30 @@ if __name__ == '__main__':
 
 def calculate_dynamic_stops(features_row, position_side, entry_price):
     """
-    Вычисляет динамические стоп-лоссы на основе VSA и волатильности
+    Вычисляет динамические стоп-лоссы на основе волатильности (с AO_5_34)
     """
-    base_sl = STOP_LOSS_PCT  # -1.0%
-    base_tp = TAKE_PROFIT_PCT  # 1.5%
+    base_sl = STOP_LOSS_PCT
+    base_tp = TAKE_PROFIT_PCT
     
-    # Корректировка на основе VSA силы
-    vsa_strength = features_row.get('vsa_strength', 0)
-    volume_ratio = features_row.get('volume_ratio', 1)
+    # Корректировка на основе моментума (AO_5_34)
+    ao_value = features_row.get('AO_5_34', 0)
+    close_price = features_row.get('close', entry_price)
     
-    if position_side == 'BUY':
-        # Для лонгов: сильные бычьи VSA = более широкие стопы (больше веры в движение)
-        if vsa_strength > 2 and volume_ratio > 1.5:
-            dynamic_sl = base_sl * 0.7  # Уменьшаем SL до -0.7%
-            dynamic_tp = base_tp * 1.3  # Увеличиваем TP до 1.95%
-        elif vsa_strength < -1:  # Слабые сигналы = тайтовые стопы
-            dynamic_sl = base_sl * 1.5  # Увеличиваем SL до -1.5%
-            dynamic_tp = base_tp * 0.8  # Уменьшаем TP до 1.2%
-        else:
-            dynamic_sl, dynamic_tp = base_sl, base_tp
-            
-    else:  # SELL
-        if vsa_strength < -2 and volume_ratio > 1.5:
-            dynamic_sl = base_sl * 0.7  # Более широкие стопы для сильных медвежьих сигналов
-            dynamic_tp = base_tp * 1.3
-        elif vsa_strength > 1:
-            dynamic_sl = base_sl * 1.5  # Тайтовые стопы при слабых сигналах
-            dynamic_tp = base_tp * 0.8
-        else:
-            dynamic_sl, dynamic_tp = base_sl, base_tp
-    
+    if close_price > 0:
+        # Используем абсолютное значение AO для оценки моментума
+        ao_abs_pct = (abs(ao_value) / close_price) * 100
+    else:
+        ao_abs_pct = 0
+
+    # Если AO большой (сильный моментум), делаем стопы шире
+    if ao_abs_pct > 0.1: # Порог для AO_abs_pct нужно будет подобрать
+        dynamic_sl = base_sl * (1 + ao_abs_pct * 5) # Увеличиваем SL сильнее
+        dynamic_tp = base_tp * (1 + ao_abs_pct * 2) # Увеличиваем TP (или уменьшаем, если AO означает перекупленность)
+    else:
+        dynamic_sl, dynamic_tp = base_sl, base_tp
+        
+    # Ограничиваем максимальные и минимальные значения
+    dynamic_sl = max(dynamic_sl, -3.0)
+    dynamic_tp = min(dynamic_tp, 3.0)
+
     return dynamic_sl, dynamic_tp

@@ -31,46 +31,48 @@ class XLSTMRLModel:
         # ✅ Фиксируем входную форму для стабильности
         inputs = Input(shape=self.input_shape, name='input_layer')
         
-        # Первый xLSTM слой с внешней памятью
+        # Первый xLSTM слой с внешней памятью (уменьшаем units и memory_size)
         xlstm1 = XLSTMLayer(
-            units=self.memory_units,
-            memory_size=self.memory_size,
+            units=self.memory_units // 2, # ИЗМЕНЕНО: Уменьшаем units
+            memory_size=self.memory_size // 2, # ИЗМЕНЕНО: Уменьшаем memory_size
             return_sequences=True,
             name='xlstm_memory_layer_1'
         )(inputs)
-        xlstm1 = LayerNormalization()(xlstm1) # <--- ДОБАВЛЕНО: LayerNormalization
+        xlstm1 = LayerNormalization()(xlstm1)
+        xlstm1 = Dropout(0.2)(xlstm1) # ИЗМЕНЕНО: Добавлен Dropout
         
-        # Второй xLSTM слой
+        # Второй xLSTM слой (уменьшаем units и memory_size)
         xlstm2 = XLSTMLayer(
-            units=self.memory_units // 2,
-            memory_size=self.memory_size // 2,
+            units=self.memory_units // 4, # ИЗМЕНЕНО: Уменьшаем units
+            memory_size=self.memory_size // 4, # ИЗМЕНЕНО: Уменьшаем memory_size
             return_sequences=True,
             name='xlstm_memory_layer_2'
         )(xlstm1)
-        xlstm2 = LayerNormalization()(xlstm2) # <--- ДОБАВЛЕНО: LayerNormalization
+        xlstm2 = LayerNormalization()(xlstm2)
+        xlstm2 = Dropout(0.2)(xlstm2) # ИЗМЕНЕНО: Добавлен Dropout
         
         # Механизм внимания
         attention = Attention(name='attention_mechanism')([xlstm2, xlstm2])
         
-        # Финальный xLSTM слой
+        # Финальный xLSTM слой (уменьшаем units и memory_size)
         xlstm_final = XLSTMLayer(
-            units=self.attention_units,
-            memory_size=self.attention_units,
+            units=self.attention_units // 2, # ИЗМЕНЕНО: Уменьшаем units
+            memory_size=self.attention_units // 2, # ИЗМЕНЕНО: Уменьшаем memory_size
             return_sequences=False,
             name='xlstm_memory_final'
         )(attention)
-        xlstm_final = LayerNormalization()(xlstm_final) # <--- ДОБАВЛЕНО: LayerNormalization
+        xlstm_final = LayerNormalization()(xlstm_final)
+        xlstm_final = Dropout(0.2)(xlstm_final) # ИЗМЕНЕНО: Добавлен Dropout
         
         # УСИЛЕННАЯ РЕГУЛЯРИЗАЦИЯ
-        dense1 = Dense(64, activation='relu', kernel_regularizer=l2(0.002), name='dense_1')(xlstm_final)  # Увеличиваем L2
-        dropout1 = Dropout(0.5)(dense1)  # Увеличиваем dropout с 0.4 до 0.5
+        dense1 = Dense(64, activation='relu', kernel_regularizer=l2(0.003), name='dense_1')(xlstm_final)  # ИЗМЕНЕНО: L2 до 0.003
+        dropout1 = Dropout(0.6)(dense1)  # ИЗМЕНЕНО: Dropout до 0.6
         
-        dense2 = Dense(32, activation='relu', kernel_regularizer=l2(0.002), name='dense_2')(dropout1)  # Увеличиваем L2
-        dropout2 = Dropout(0.4)(dense2)  # Увеличиваем dropout с 0.3 до 0.4
+        dense2 = Dense(32, activation='relu', kernel_regularizer=l2(0.003), name='dense_2')(dropout1)  # ИЗМЕНЕНО: L2 до 0.003
+        dropout2 = Dropout(0.5)(dense2)  # ИЗМЕНЕНО: Dropout до 0.5
         
-        # ДОБАВЛЯЕМ ДОПОЛНИТЕЛЬНЫЙ СЛОЙ ДЛЯ ЛУЧШЕЙ РЕГУЛЯРИЗАЦИИ
-        dense3 = Dense(16, activation='relu', kernel_regularizer=l2(0.001), name='dense_3')(dropout2)
-        dropout3 = Dropout(0.3)(dense3)
+        dense3 = Dense(16, activation='relu', kernel_regularizer=l2(0.002), name='dense_3')(dropout2) # ИЗМЕНЕНО: L2 до 0.002
+        dropout3 = Dropout(0.4)(dense3) # ИЗМЕНЕНО: Dropout до 0.4
         
         # НОВЫЙ КОД
         outputs = Dense(3, activation='softmax', name='output_layer')(dropout3)  # Используем dropout3

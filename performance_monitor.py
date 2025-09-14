@@ -21,16 +21,15 @@ class PerformanceMonitor:
             'total_pnl': 0,
             'winning_trades': 0,
             'losing_trades': 0,
-            'vsa_confirmed_trades': 0,
             'model_accuracy': [],
             'start_time': time.time()
         }
     
-    def log_trade_opened(self, symbol, decision, vsa_confirmed=False):
-        """Логирует открытие сделки"""
+    def log_trade_opened(self, symbol, decision): # ИЗМЕНЕНО: Удален vsa_confirmed
+        """Логирует открытие сделки (без VSA подтверждения)"""
         self.daily_stats['trades_opened'] += 1
-        if vsa_confirmed:
-            self.daily_stats['vsa_confirmed_trades'] += 1
+        # if vsa_confirmed: # <--- УДАЛЕНО
+        #     self.daily_stats['vsa_confirmed_trades'] += 1 # <--- УДАЛЕНО
         
         self.save_stats()
     
@@ -61,7 +60,7 @@ class PerformanceMonitor:
         print(f"📉 Закрыто сделок: {stats['trades_closed']}")
         print(f"💰 Общий PnL: {stats['total_pnl']:.2f}%")
         print(f"🎯 Win Rate: {win_rate:.1f}%")
-        print(f"✅ VSA подтвержденных: {stats['vsa_confirmed_trades']}")
+        # print(f"✅ VSA подтвержденных: {stats['vsa_confirmed_trades']}") # <--- УДАЛЕНО
         
         if stats['model_accuracy']:
             accuracy = sum(stats['model_accuracy']) / len(stats['model_accuracy']) * 100

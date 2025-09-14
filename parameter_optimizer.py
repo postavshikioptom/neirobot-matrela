@@ -14,7 +14,6 @@ class ParameterOptimizer:
             'confidence_threshold': 0.65,
             'take_profit_pct': 1.5,
             'stop_loss_pct': -1.0,
-            'vsa_weight': 0.4,
             'xlstm_weight': 0.6
         }
         
@@ -54,7 +53,6 @@ class ParameterOptimizer:
             (0.5, 0.9),   # confidence_threshold
             (0.8, 3.0),   # take_profit_pct
             (-3.0, -0.5), # stop_loss_pct
-            (0.2, 0.8),   # vsa_weight
             (0.2, 0.8)    # xlstm_weight
         ]
         
@@ -63,7 +61,6 @@ class ParameterOptimizer:
             self.current_params['confidence_threshold'],
             self.current_params['take_profit_pct'],
             abs(self.current_params['stop_loss_pct']),  # Делаем положительным для оптимизации
-            self.current_params['vsa_weight'],
             self.current_params['xlstm_weight']
         ]
         
@@ -83,8 +80,7 @@ class ParameterOptimizer:
                 'confidence_threshold': result.x[0],
                 'take_profit_pct': result.x[1],
                 'stop_loss_pct': -result.x[2],  # Возвращаем отрицательное значение
-                'vsa_weight': result.x[3],
-                'xlstm_weight': result.x[4]
+                'xlstm_weight': result.x[3]
             }
             
             print(f"✅ Параметры оптимизированы!")

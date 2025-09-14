@@ -119,53 +119,18 @@ class HybridDecisionMaker:
             return 'HOLD'
     
     def _analyze_vsa_context(self, row):
-        """Анализирует VSA контекст для улучшения решений"""
-        vsa_signals = {
+        """VSA отключен, возвращаем пустые сигналы."""
+        return {
             'bullish_strength': 0,
             'bearish_strength': 0,
             'uncertainty': 0,
             'volume_confirmation': False
         }
-        
-        # Бычьи VSA сигналы
-        if row['vsa_no_supply'] == 1:
-            vsa_signals['bullish_strength'] += 2
-        if row['vsa_stopping_volume'] == 1:
-            vsa_signals['bullish_strength'] += 3
-        if row['vsa_strength'] > 1:
-            vsa_signals['bullish_strength'] += 1
-            
-        # Медвежьи VSA сигналы  
-        if row['vsa_no_demand'] == 1:
-            vsa_signals['bearish_strength'] += 2
-        if row['vsa_climactic_volume'] == 1:
-            vsa_signals['bearish_strength'] += 3
-        if row['vsa_strength'] < -1:
-            vsa_signals['bearish_strength'] += 1
-            
-        # Неопределенность
-        if row['vsa_test'] == 1:
-            vsa_signals['uncertainty'] += 2
-        if row['vsa_effort_vs_result'] == 1:
-            vsa_signals['uncertainty'] += 1
-            
-        # Подтверждение объемом
-        if row['volume_ratio'] > 1.5:
-            vsa_signals['volume_confirmation'] = True
-            
-        return vsa_signals
     
     def _create_rl_observation(self, xlstm_prediction, latest_row):
-        """Создает наблюдение для RL агента"""
-        vsa_features = np.array([
-            latest_row['vsa_no_demand'],
-            latest_row['vsa_no_supply'], 
-            latest_row['vsa_stopping_volume'],
-            latest_row['vsa_climactic_volume'],
-            latest_row['vsa_test'],
-            latest_row['vsa_effort_vs_result'],
-            latest_row['vsa_strength']
-        ])
+        """Создает наблюдение для RL агента (без VSA)"""
+        # VSA признаки удалены, поэтому размер наблюдения уменьшится.
+        # Убедитесь, что TradingEnvRL также отражает это изменение.
         
         portfolio_state = np.array([
             self.current_balance / 10000,  # Нормализованный баланс
@@ -174,7 +139,7 @@ class HybridDecisionMaker:
             self.steps_in_position / 100.0
         ])
         
-        return np.concatenate([xlstm_prediction, vsa_features, portfolio_state])
+        return np.concatenate([xlstm_prediction, portfolio_state]) # ИЗМЕНЕНО: Без vsa_features
     
     def _make_final_decision(self, xlstm_pred, xlstm_conf, vsa_signals, rl_decision, threshold):
         """Принимает финальное решение с учетом всех факторов"""
@@ -192,30 +157,13 @@ class HybridDecisionMaker:
             print(f"xLSTM и RL согласны: {xlstm_decision}")
             return xlstm_decision
         
-        # При разногласиях используем VSA для принятия решения
-        if xlstm_decision == 'BUY':
-            if vsa_signals['bullish_strength'] >= 2 and vsa_signals['volume_confirmation']:
-                print("VSA подтверждает покупку")
-                return 'BUY'
-            elif vsa_signals['bearish_strength'] >= 2:
-                print("VSA противоречит покупке")
-                return 'HOLD'
-                
-        elif xlstm_decision == 'SELL':
-            if vsa_signals['bearish_strength'] >= 2 and vsa_signals['volume_confirmation']:
-                print("VSA подтверждает продажу")
-                return 'SELL'
-            elif vsa_signals['bullish_strength'] >= 2:
-                print("VSA противоречит продаже")
-                return 'HOLD'
+        # Если не согласны, и xLSTM уверенность высокая, доверяем xLSTM
+        if xlstm_conf >= threshold + 0.1: # ИЗМЕНЕНО: Добавляем небольшой запас
+            print(f"xLSTM уверенность ({xlstm_conf:.3f}) выше RL, решение: {xlstm_decision}")
+            return xlstm_decision
         
-        # Если слишком много неопределенности, держим HOLD
-        if vsa_signals['uncertainty'] >= 3:
-            print("Высокая неопределенность VSA, решение: HOLD")
-            return 'HOLD'
-        
-        # По умолчанию возвращаем RL решение
-        print(f"Финальное решение по RL: {rl_decision}")
+        # В противном случае, по умолчанию возвращаем RL решение (или HOLD, если RL не уверен)
+        print(f"xLSTM и RL не согласны, доверяем RL: {rl_decision}")
         return rl_decision
     
     def _update_state(self, decision):
@@ -246,11 +194,7 @@ class HybridDecisionMaker:
         - HOLD: {last_decision['xlstm_prediction'][2]:.3f}
         - Уверенность: {last_decision['xlstm_confidence']:.3f}
         
-        VSA сигналы:
-        - Бычья сила: {last_decision['vsa_signals']['bullish_strength']}
-        - Медвежья сила: {last_decision['vsa_signals']['bearish_strength']}
-        - Неопределенность: {last_decision['vsa_signals']['uncertainty']}
-        - Подтверждение объемом: {last_decision['vsa_signals']['volume_confirmation']}
+        - Анализ паттернов и индикаторов: Активирован
         
         RL решение: {last_decision['rl_decision']}
         """

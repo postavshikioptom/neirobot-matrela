@@ -36,7 +36,7 @@ if __name__ == "__main__":
 # os.environ['TF_XLA_FLAGS'] = '--tf_xla_enable_xla_devices=false'
 
 # Новые импорты
-from feature_engineering import calculate_features, detect_candlestick_patterns, calculate_vsa_features
+from feature_engineering import calculate_features, detect_candlestick_patterns
 from models.xlstm_rl_model import XLSTMRLModel
 from rl_agent import IntelligentRLAgent
 from trading_env import TradingEnvRL
@@ -89,19 +89,22 @@ def prepare_xlstm_rl_data(data_path, sequence_length=10):
     
     # Объединенные признаки для новой архитектуры
     feature_cols = [
-        # Технические индикаторы
-        'RSI_14', 'MACD_12_26_9', 'BBL_20_2.0', 'BBM_20_2.0', 'BBU_20_2.0',
+        # ✅ ВСЕ ТЕХНИЧЕСКИЕ ИНДИКАТОРЫ (БЕЗ БОЛЛИНДЖЕРА И ATR_14)
+        'RSI_14', 'MACD_12_26_9', 'MACD_signal', 'MACD_hist',
         'ADX_14', 'STOCHk_14_3_3', 'STOCHd_14_3_3',
-        'ATR_14', # <--- ДОБАВЛЕНО
-        # Паттерны
-        'CDLHAMMER', 'CDLENGULFING', 'CDLDOJI', 'CDLSHOOTINGSTAR',
-        'CDLHANGINGMAN', 'CDLMARUBOZU',
-        # VSA признаки (новые!)
-        'vsa_no_demand', 'vsa_no_supply', 'vsa_stopping_volume',
-        'vsa_climactic_volume', 'vsa_test', 'vsa_effort_vs_result', 'vsa_strength',
-        # Дополнительные рыночные данные
-        'volume_ratio', 'spread_ratio', 'close_position',
-        'is_event' # <--- ДОБАВЛЕНО: Новый признак
+        'WILLR_14', # 🔥 НОВЫЙ ИНДИКАТОР
+        'AO_5_34',  # 🔥 НОВЫЙ ИНДИКАТОР
+        
+        # ❌ ВСЕ ПАТТЕРНЫ ЗАКОММЕНТИРОВАНЫ
+        # 'CDLHAMMER', 'CDLENGULFING', 'CDLDOJI', 'CDLSHOOTINGSTAR',
+        # 'CDLHANGINGMAN', 'CDLMARUBOZU',
+        # 'CDLINVERTEDHAMMER', 'CDLDRAGONFLYDOJI', 'CDLBELTHOLD',
+        # 'hammer_f', 'hangingman_f', 'engulfing_f', 'doji_f',
+        # 'shootingstar_f', 'bullish_marubozu_f',
+        # 'inverted_hammer_f', 'dragonfly_doji_f', 'bullish_pin_bar_f', 'bullish_belt_hold_f',
+        
+        # ✅ ОСТАВЛЯЕМ EVENT SAMPLING
+        'is_event'
     ]
     
     all_X = []
@@ -121,7 +124,7 @@ def prepare_xlstm_rl_data(data_path, sequence_length=10):
         # === НОВАЯ ОБРАБОТКА С VSA ===
         df = calculate_features(df)
         df = detect_candlestick_patterns(df)
-        df = calculate_vsa_features(df)  # Добавляем VSA!
+        # df = calculate_vsa_features(df)  # <--- ЗАКОММЕНТИРОВАНО: Временно отключаем VSA
         
         # =====================================================================
         # НОВЫЙ БЛОК: ФИЛЬТРАЦИЯ ПО 'is_event' (Event-Based Sampling)
@@ -147,112 +150,104 @@ def prepare_xlstm_rl_data(data_path, sequence_length=10):
         # КОНЕЦ НОВОГО БЛОКА
         # =====================================================================
         
-        # Создаем целевые метки на основе будущих цен + VSA подтверждения
+        # Создаем целевые метки на основе будущих цен + индикаторов
         df['future_return'] = (df['close'].shift(-5) - df['close']) / df['close']
         
-        # =====================================================================
-        # НОВЫЙ КОД - БОЛЕЕ СТРОГИЕ УСЛОВИЯ ДЛЯ BUY/SELL
-        # =====================================================================
         # Увеличиваем пороги для генерации торговых сигналов
-        df['base_threshold'] = 0.008  # Увеличиваем с 0.0005 до 0.008 (0.8%)
+        df['base_threshold'] = 0.003 # 🔥 ИЗМЕНЕНО: С 0.008 до 0.003 (более мягкий порог)
         df['dynamic_threshold'] = np.maximum(
             df['base_threshold'],
-            (df['ATR_14'] / df['close'] * 1.2).fillna(0.008)  # Увеличиваем множитель
+            (abs(df['AO_5_34']) / df['close'] * 1.0).fillna(0.003) # 🔥 ИЗМЕНЕНО: Использование AO_5_34 вместо ATR_14
         )
 
-        # Более строгие VSA условия
-        df['vsa_buy_strength'] = (
-            0.5 * (df['vsa_no_supply'] == 1) +
-            0.5 * (df['vsa_stopping_volume'] == 1) +
-            0.3 * np.clip(df['vsa_strength'] / 2.0, 0, 1)  # Более строгая нормализация
-        )
+        # Классические технические фильтры
+        strong_trend = df['ADX_14'] > 20 # 🔥 ИЗМЕНЕНО: С 25 до 20 (более мягкий порог)
+        
+        # Условия для BUY
+        rsi_buy_zone = df['RSI_14'] < 40 # 🔥 ИЗМЕНЕНО: С 30 до 40
+        macd_buy_signal = (df['MACD_12_26_9'] > df['MACD_signal']) & \
+                          (df['MACD_hist'] > 0.0005) # 🔥 ИЗМЕНЕНО: С 0.001 до 0.0005
+        willr_buy_signal = df['WILLR_14'] < -80 # 🔥 НОВОЕ: WILLR_14 для BUY
+        ao_buy_signal = df['AO_5_34'] > 0 # 🔥 НОВОЕ: AO выше нуля
+        
+        # Условия для SELL
+        rsi_sell_zone = df['RSI_14'] > 60 # 🔥 ИЗМЕНЕНО: С 70 до 60
+        macd_sell_signal = (df['MACD_12_26_9'] < df['MACD_signal']) & \
+                           (df['MACD_hist'] < -0.0005) # 🔥 ИЗМЕНЕНО: С -0.001 до -0.0005
+        willr_sell_signal = df['WILLR_14'] > -20 # 🔥 НОВОЕ: WILLR_14 для SELL
+        ao_sell_signal = df['AO_5_34'] < 0 # 🔥 НОВОЕ: AO ниже нуля
 
-        df['vsa_sell_strength'] = (
-            0.5 * (df['vsa_no_demand'] == 1) +
-            0.5 * (df['vsa_climactic_volume'] == 1) +
-            0.3 * np.clip(-df['vsa_strength'] / 2.0, 0, 1)
-        )
-
-        # Дополнительные технические фильтры
-        strong_trend = df['ADX_14'] > 25
-        high_volume = df['volume_ratio'] > 1.5
-        rsi_extreme_buy = df['RSI_14'] < 30
-        rsi_extreme_sell = df['RSI_14'] > 70
-
-        # БОЛЕЕ СТРОГИЕ условия для BUY/SELL
+        # Условия для BUY/SELL только на основе future_return и классических индикаторов
         buy_condition = (
-            (df['future_return'] > df['dynamic_threshold']) &
-            (df['vsa_buy_strength'] > 0.6) &  # Увеличиваем порог с 0.2 до 0.6
-            (strong_trend | high_volume | rsi_extreme_buy)  # Дополнительное подтверждение
+            (df['future_return'] > df['dynamic_threshold'] * 1.0) &
+            (strong_trend & (rsi_buy_zone | macd_buy_signal | willr_buy_signal | ao_buy_signal)) # 🔥 ИЗМЕНЕНО: Смешанные условия с OR
         )
 
         sell_condition = (
-            (df['future_return'] < -df['dynamic_threshold']) &
-            (df['vsa_sell_strength'] > 0.6) &  # Увеличиваем порог с 0.2 до 0.6
-            (strong_trend | high_volume | rsi_extreme_sell)  # Дополнительное подтверждение
+            (df['future_return'] < -df['dynamic_threshold'] * 1.0) &
+            (strong_trend & (rsi_sell_zone | macd_sell_signal | willr_sell_signal | ao_sell_signal)) # 🔥 ИЗМЕНЕНО: Смешанные условия с OR
         )
-        # =====================================================================
-        # КОНЕЦ НОВОГО БЛОКА
-        # =====================================================================
         
-        # Сначала устанавливаем все в HOLD, затем переписываем
+        # Устанавливаем метки
         df['target'] = 2  # По умолчанию HOLD
-        df.loc[buy_condition, 'target'] = 0 # BUY
-        df.loc[sell_condition, 'target'] = 1 # SELL
+        df.loc[buy_condition, 'target'] = 0  # BUY
+        df.loc[sell_condition, 'target'] = 1  # SELL
 
-        # ДОБАВЬТЕ: Принудительная балансировка классов (если необходимо)
-        # Этот блок можно включать, если после ослабления порогов баланс все еще очень плохой.
-        # Он попытается переклассифицировать часть "HOLD" в BUY/SELL на основе других индикаторов.
-        # Это может быть "грязным" решением, но иногда необходимо для обучения.
+        # 🔥 НОВЫЕ ЛОГИ: Количество сигналов до балансировки
+        initial_buy_signals = (df['target'] == 0).sum()
+        initial_sell_signals = (df['target'] == 1).sum()
+        initial_hold_signals = (df['target'] == 2).sum()
+        total_initial_signals = len(df)
+        print(f"📊 Исходный баланс классов для {symbol} (до imblearn):")
+        print(f"  BUY: {initial_buy_signals} ({initial_buy_signals/total_initial_signals*100:.2f}%)")
+        print(f"  SELL: {initial_sell_signals} ({initial_sell_signals/total_initial_signals*100:.2f}%)")
+        print(f"  HOLD: {initial_hold_signals} ({initial_hold_signals/total_initial_signals*100:.2f}%)")
+        print(f"  Общее количество сигналов: {total_initial_signals}")
+
         current_buy_count = (df['target'] == 0).sum()
         current_sell_count = (df['target'] == 1).sum()
         current_hold_count = (df['target'] == 2).sum()
 
-        # =====================================================================
-        # НОВЫЙ КОД - УМЕНЬШАЕМ ПЕРЕКЛАССИФИКАЦИЮ
-        # =====================================================================
-        # Теперь НЕ переклассифицируем, если HOLD составляет меньше 70%
-        if current_hold_count < (current_buy_count + current_sell_count) * 2.0:  # Если HOLD < 66%
-            print(f"⚠️ Слишком мало HOLD сигналов. ДОБАВЛЯЕМ HOLD вместо переклассификации.")
+        # НОВЫЙ КОД - Менее агрессивная переклассификация HOLD
+        if current_hold_count > (current_buy_count + current_sell_count) * 3.0:
+            print(f"⚠️ Сильный дисбаланс классов. Попытка УМНОЙ переклассификации части HOLD-сигналов (с индикаторами).")
+            hold_indices = df[df['target'] == 2].index
             
-            # Вместо переклассификации HOLD в BUY/SELL, делаем обратное
-            # Переклассифицируем часть слабых BUY/SELL в HOLD
-            
-            weak_buy_indices = df[
-                (df['target'] == 0) &
-                (df['vsa_buy_strength'] < 0.4) &  # Слабые VSA сигналы
-                (df['RSI_14'] > 35) & (df['RSI_14'] < 65)  # RSI в нейтральной зоне
-            ].index
-            
-            weak_sell_indices = df[
-                (df['target'] == 1) &
-                (df['vsa_sell_strength'] < 0.4) &  # Слабые VSA сигналы
-                (df['RSI_14'] > 35) & (df['RSI_14'] < 65)  # RSI в нейтральной зоне
-            ].index
-            
-            # Переклассифицируем 30% слабых сигналов в HOLD
             import random
             random.seed(42)
             
-            if len(weak_buy_indices) > 0:
-                reclassify_buy = random.sample(
-                    list(weak_buy_indices),
-                    min(int(len(weak_buy_indices) * 0.3), len(weak_buy_indices))
-                )
-                df.loc[reclassify_buy, 'target'] = 2  # Переводим в HOLD
-            
-            if len(weak_sell_indices) > 0:
-                reclassify_sell = random.sample(
-                    list(weak_sell_indices),
-                    min(int(len(weak_sell_indices) * 0.3), len(weak_sell_indices))
-                )
-                df.loc[reclassify_sell, 'target'] = 2  # Переводим в HOLD
+            reclassify_count = int(current_hold_count * 0.10)
+            if reclassify_count > 0:
+                reclassify_indices = random.sample(list(hold_indices), min(reclassify_count, len(hold_indices)))
+                
+                for idx in reclassify_indices:
+                    if idx < 5: continue
+                    
+                    rsi = df.loc[idx, 'RSI_14']
+                    adx = df.loc[idx, 'ADX_14']
+                    macd_hist = df.loc[idx, 'MACD_hist']
+                    willr = df.loc[idx, 'WILLR_14'] # 🔥 НОВОЕ
+                    ao = df.loc[idx, 'AO_5_34']     # 🔥 НОВОЕ
+                    price_change_3_period = df['close'].pct_change(3).loc[idx]
 
+                    # Условия для переклассификации (с индикаторами) - теперь с AO и WILLR
+                    # 1. RSI + ADX + MACD_hist + WILLR + AO + движение цены
+                    if (rsi < 40 and adx > 20 and macd_hist > 0.0005 and willr < -80 and ao > 0 and price_change_3_period > 0.003): # 🔥 ИЗМЕНЕНО
+                        df.loc[idx, 'target'] = 0  # BUY
+                    elif (rsi > 60 and adx > 20 and macd_hist < -0.0005 and willr > -20 and ao < 0 and price_change_3_period < -0.003): # 🔥 ИЗМЕНЕНО
+                        df.loc[idx, 'target'] = 1  # SELL
+                    
+                    # 2. Сильный тренд по ADX + движение цены (без других индикаторов для более широкого охвата)
+                    elif (adx > 30 and abs(price_change_3_period) > 0.005): # 🔥 ИЗМЕНЕНО: Порог ADX и price_change
+                        df.loc[idx, 'target'] = 0 if price_change_3_period > 0 else 1
+            
+            print(f"Баланс классов после УМНОЙ переклассификации (с индикаторами):")
+            unique, counts = np.unique(df['target'], return_counts=True)
+            class_names = ['BUY', 'SELL', 'HOLD']
+            for class_idx, count in zip(unique, counts):
+                print(f"  {class_names[class_idx]}: {count} ({count/len(df)*100:.1f}%)")
         else:
-            print(f"✅ Баланс классов приемлемый, переклассификация не нужна.")
-        # =====================================================================
-        # КОНЕЦ НОВОГО БЛОКА
-        # =====================================================================
+            print(f"✅ Баланс классов приемлемый, переклассификация HOLD не требуется.")
         
         # Убираем NaN и обеспечиваем наличие всех признаков
         df.dropna(subset=['future_return'], inplace=True)
@@ -309,10 +304,10 @@ def prepare_xlstm_rl_data(data_path, sequence_length=10):
         # (предполагаем, что общее число примеров будет около len(X) * (1 + oversampling_ratio))
         
         # Рассчитываем целевые количества на основе общего числа примеров
-        # Целевое соотношение: 20% BUY, 20% SELL, 60% HOLD (более агрессивный oversampling)
+        # Целевое соотношение: 15% BUY, 15% SELL, 70% HOLD (более реалистичный oversampling)
         total_samples = len(X)
-        target_buy_count = int(total_samples * 0.20)  # ИЗМЕНЕНО: с 0.10 до 0.20
-        target_sell_count = int(total_samples * 0.20) # ИЗМЕНЕНО: с 0.10 до 0.20
+        target_buy_count = int(total_samples * 0.15) # 🔥 ИЗМЕНЕНО: с 0.20 до 0.15
+        target_sell_count = int(total_samples * 0.15) # 🔥 ИЗМЕНЕНО: с 0.20 до 0.15
         
         current_buy_count = Counter(y_labels)[0]
         current_sell_count = Counter(y_labels)[1]
@@ -446,13 +441,14 @@ def train_xlstm_rl_system(X, y, processed_dfs, feature_cols):
     # Увеличиваем веса BUY/SELL немного, чтобы модель уделяла им больше внимания,
     # но не настолько, чтобы она полностью игнорировала HOLD.
     # Уменьшаем вес HOLD, но не слишком сильно.
+    # НОВЫЙ КОД - Корректируем веса классов (более сбалансированные, с акцентом на HOLD)
     if 0 in class_weight_dict:
-        class_weight_dict[0] *= 1.5  # ИЗМЕНЕНО: Увеличиваем вес BUY
+        class_weight_dict[0] *= 1.5  # ИЗМЕНЕНО: Уменьшаем BUY (с 1.8 до 1.5)
     if 1 in class_weight_dict:
-        class_weight_dict[1] *= 1.5  # ИЗМЕНЕНО: Увеличиваем вес SELL
+        class_weight_dict[1] *= 1.5  # ИЗМЕНЕНО: Устанавливаем SELL на 1.5 (равный BUY)
     
     if 2 in class_weight_dict:
-        class_weight_dict[2] *= 0.7  # ИЗМЕНЕНО: Уменьшаем вес HOLD
+        class_weight_dict[2] *= 2.0  # ИЗМЕНЕНО: Значительно увеличиваем HOLD (с 1.5 до 2.0)
     
     print(f"📊 ИСПРАВЛЕННЫЕ веса классов: {class_weight_dict}")
     # =====================================================================
@@ -548,8 +544,9 @@ def train_xlstm_rl_system(X, y, processed_dfs, feature_cols):
 
     # Теперь xlstm_model.model гарантированно не None, можно компилировать
     # НОВЫЙ КОД - Инициализация Learning Rate как float
+    # НОВЫЙ КОД - Уменьшаем Learning Rate
     optimizer = tf.keras.optimizers.Adam(
-        learning_rate=0.0005,  # ИЗМЕНЕНО: Возвращаем float literal
+        learning_rate=0.0002,  # ИЗМЕНЕНО: Уменьшаем LR с 0.0005 до 0.0002
         clipnorm=0.5,
         weight_decay=0.0001
     )
@@ -579,11 +576,16 @@ def train_xlstm_rl_system(X, y, processed_dfs, feature_cols):
                 print(f"Эпоха {epoch}: Память очищена")
     
     class DetailedProgressCallback(tf.keras.callbacks.Callback):
+        def __init__(self, X_val, feature_cols, class_names=['BUY', 'SELL', 'HOLD']): # ИЗМЕНЕНО: Добавлены X_val, feature_cols
+            super().__init__()
+            self.X_val = X_val
+            self.feature_cols = feature_cols
+            self.class_names = class_names
+
         def on_epoch_end(self, epoch, logs=None):
             logs = logs or {} # Убедимся, что logs не None
             try:
                 lr = self.model.optimizer.learning_rate.numpy()
-                # ИЗМЕНЕНО: Добавлены метрики accuracy, precision, recall
                 # ИЗМЕНЕНО: Добавлены метрики accuracy, precision, recall
                 print(f"Эпоха {epoch+1}/100 - loss: {logs.get('loss', 0):.4f} - val_loss: {logs.get('val_loss', 0):.4f} - "
                       f"accuracy: {logs.get('accuracy', 0):.2f} - val_accuracy: {logs.get('val_accuracy', 0):.2f} - "
@@ -591,14 +593,48 @@ def train_xlstm_rl_system(X, y, processed_dfs, feature_cols):
                       f"recall: {logs.get('recall', 0):.2f} - val_recall: {logs.get('val_recall', 0):.2f} - lr: {lr:.2e}")
             
                 # ДОБАВЛЕНО: Вывод метрик по классам (если доступны)
-                # Это будет полезно для диагностики
                 if 'precision_0' in logs:
                     print(f"  Class 0 (BUY): Prec={logs.get('precision_0', 0):.2f}, Rec={logs.get('recall_0', 0):.2f}")
                 if 'precision_1' in logs:
                     print(f"  Class 1 (SELL): Prec={logs.get('precision_1', 0):.2f}, Rec={logs.get('recall_1', 0):.2f}")
                 if 'precision_2' in logs:
                     print(f"  Class 2 (HOLD): Prec={logs.get('precision_2', 0):.2f}, Rec={logs.get('recall_2', 0):.2f}")
-                
+
+                # НОВЫЙ КОД - Анализ важности признаков
+                if epoch % 5 == 0 and self.X_val is not None and self.feature_cols is not None: # Анализируем каждые 5 эпох
+                    print("\n📈 ТОП-10 ВЛИЯТЕЛЬНЫХ ПРИЗНАКОВ (на валидации):")
+                    # Получаем предсказания модели на валидационном наборе
+                    val_preds = self.model.predict(self.X_val, verbose=0)
+                    predicted_classes = np.argmax(val_preds, axis=1)
+
+                    # Для каждого класса, найдем признаки, которые чаще всего были активны
+                    class_influence = {0: [], 1: [], 2: []} # BUY, SELL, HOLD
+
+                    for class_id in range(3):
+                        # Выбираем только те данные валидации, где модель предсказала этот класс
+                        class_indices = np.where(predicted_classes == class_id)[0]
+                        if len(class_indices) == 0:
+                            continue
+
+                        # Берем соответствующие признаки из X_val
+                        # Усредняем активации признаков для этого класса
+                        active_features = self.X_val[class_indices, -1, :] # Берем признаки последней свечи в последовательности
+                        
+                        # Определяем "активность" признака (например, если его значение > 0.5 или просто его значение)
+                        # Для простоты, мы будем считать среднее значение признака
+                        avg_active_features = np.mean(active_features, axis=0)
+
+                        # Создаем пары (значение, имя_признака)
+                        feature_scores = [(avg_active_features[i], self.feature_cols[i]) for i in range(len(self.feature_cols))]
+                        
+                        # Сортируем по абсолютному значению
+                        feature_scores.sort(key=lambda x: abs(x[0]), reverse=True)
+                        
+                        # Выводим топ-10
+                        print(f"  Для класса {self.class_names[class_id]}:")
+                        for score, name in feature_scores[:10]:
+                            print(f"    - {name}: {score:.4f}")
+
                 # Проверяем на переобучение
                 if logs.get('val_loss', 0) > logs.get('loss', 0) * 2:
                     print("⚠️ Возможное переобучение!")
@@ -614,9 +650,9 @@ def train_xlstm_rl_system(X, y, processed_dfs, feature_cols):
             verbose=1,
             min_delta=0.001
         ),
-        AntiOverfittingCallback(patience=8, min_improvement=0.005),  # НОВЫЙ КОЛБЭК
+        AntiOverfittingCallback(patience=12, min_improvement=0.005),  # ИЗМЕНЕНО: patience до 12
         MemoryCleanupCallback(),
-        DetailedProgressCallback(),
+        DetailedProgressCallback(X_val_to_model, feature_cols), # ИЗМЕНЕНО: Передаем X_val_to_model и feature_cols
         tf.keras.callbacks.ReduceLROnPlateau(
             monitor='val_loss',
             factor=0.7,

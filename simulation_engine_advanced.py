@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from feature_engineering import calculate_features, detect_candlestick_patterns, calculate_vsa_features
+from feature_engineering import calculate_features, detect_candlestick_patterns
 from hybrid_decision_maker import HybridDecisionMaker
 import config
 import warnings
@@ -26,9 +26,6 @@ class AdvancedSimulationEngine:
             'ATR_14', # <--- ДОБАВЛЕНО
             'CDLHAMMER', 'CDLENGULFING', 'CDLDOJI', 'CDLSHOOTINGSTAR',
             'CDLHANGINGMAN', 'CDLMARUBOZU',
-            'vsa_no_demand', 'vsa_no_supply', 'vsa_stopping_volume',
-            'vsa_climactic_volume', 'vsa_test', 'vsa_effort_vs_result', 'vsa_strength',
-            'volume_ratio', 'spread_ratio', 'close_position'
         ]
         
         # Загружаем гибридную систему
@@ -55,7 +52,7 @@ class AdvancedSimulationEngine:
         # Полная обработка с VSA
         df_symbol = calculate_features(df_symbol)
         df_symbol = detect_candlestick_patterns(df_symbol)
-        df_symbol = calculate_vsa_features(df_symbol)
+        # df_symbol = calculate_vsa_features(df_symbol) # <--- ЗАКОММЕНТИРОВАНО
         
         # Убираем NaN
         df_symbol.dropna(inplace=True)
@@ -94,7 +91,6 @@ class AdvancedSimulationEngine:
                 'hybrid_conservative': {'confidence_threshold': 0.8, 'tp': 1.5, 'sl': -1.0},
                 'hybrid_balanced': {'confidence_threshold': 0.6, 'tp': 1.2, 'sl': -1.2},
                 'hybrid_aggressive': {'confidence_threshold': 0.4, 'tp': 1.0, 'sl': -1.5},
-                'vsa_only': {'vsa_only': True, 'tp': 1.2, 'sl': -1.2},
             }
             
             symbol_results = {}
@@ -137,13 +133,10 @@ class AdvancedSimulationEngine:
             sequence_df = df.iloc[i-config.SEQUENCE_LENGTH:i+1]
             
             # Получаем решение
-            if vsa_only:
-                decision = self.get_vsa_only_decision(df.iloc[i])
-            else:
-                try:
-                    decision = self.decision_maker.get_decision(sequence_df, confidence_threshold)
-                except:
-                    decision = 'HOLD'
+            try:
+                decision = self.decision_maker.get_decision(sequence_df, confidence_threshold)
+            except:
+                decision = 'HOLD'
             
             # Рассчитываем текущий PnL если в позиции
             current_pnl_pct = 0
@@ -226,18 +219,6 @@ class AdvancedSimulationEngine:
         # Вычисляем метрики
         return self.calculate_performance_metrics(trades, balance_history, initial_balance)
     
-    def get_vsa_only_decision(self, row):
-        """Принимает решение только на основе VSA"""
-        
-        # Сильные бычьи сигналы
-        if (row['vsa_no_supply'] == 1 or row['vsa_stopping_volume'] == 1) and row['volume_ratio'] > 1.3:
-            return 'BUY'
-        
-        # Сильные медвежьи сигналы
-        if (row['vsa_no_demand'] == 1 or row['vsa_climactic_volume'] == 1) and row['volume_ratio'] > 1.3:
-            return 'SELL'
-        
-        return 'HOLD'
     
     def calculate_performance_metrics(self, trades, balance_history, initial_balance):
         """Вычисляет детальные метрики производительности"""
@@ -310,7 +291,7 @@ class AdvancedSimulationEngine:
             return
         
         print("\n" + "="*80)
-        print("КОМПЛЕКСНЫЙ ОТЧЕТ ПО СИМУЛЯЦИЯМ xLSTM + VSA + RL")
+        print("КОМПЛЕКСНЫЙ ОТЧЕТ ПО СИМУЛЯЦИЯМ xLSTM + RL")
         print("="*80)
         
         # Собираем данные для сравнения

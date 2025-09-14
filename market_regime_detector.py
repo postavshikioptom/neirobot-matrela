@@ -44,16 +44,33 @@ class MarketRegimeDetector:
         df['volume_volatility'] = df['volume'].rolling(20).std() / df['volume'].rolling(20).mean()
         
         # Технические признаки
-        df['rsi_regime'] = np.where(df['RSI_14'] > 70, 1, np.where(df['RSI_14'] < 30, -1, 0))
-        df['bb_position'] = (df['close'] - df['BBL_20_2.0']) / (df['BBU_20_2.0'] - df['BBL_20_2.0'])
+        if 'RSI_14' in df.columns:
+            df['rsi_regime'] = np.where(df['RSI_14'] > 70, 1, np.where(df['RSI_14'] < 30, -1, 0))
+        else:
+            df['rsi_regime'] = 0
+
+        # 🔥 ЗАКОММЕНТИРОВАНО: bb_position
+        # if 'BBL_20_2.0' in df.columns and 'BBU_20_2.0' in df.columns:
+        #     df['bb_position'] = (df['close'] - df['BBL_20_2.0']) / (df['BBU_20_2.0'] - df['BBL_20_2.0'])
+        # else:
+        #     df['bb_position'] = 0
         
-        # VSA режимные признаки
-        df['vsa_activity'] = df['vsa_strength'].rolling(10).std()
-        df['vsa_direction'] = df['vsa_strength'].rolling(10).mean()
-        
+        # 🔥 НОВЫЕ ПРИЗНАКИ РЕЖИМА: AO_5_34 и WILLR_14
+        if 'AO_5_34' in df.columns:
+            df['ao_regime'] = np.where(df['AO_5_34'] > 0, 1, np.where(df['AO_5_34'] < 0, -1, 0)) # AO > 0 bullish, < 0 bearish
+        else:
+            df['ao_regime'] = 0
+
+        if 'WILLR_14' in df.columns:
+            df['willr_regime'] = np.where(df['WILLR_14'] < -80, 1, np.where(df['WILLR_14'] > -20, -1, 0)) # WILLR < -80 oversold, > -20 overbought
+        else:
+            df['willr_regime'] = 0
+
         regime_features = [
             'volatility', 'trend_strength', 'volume_trend', 'volume_volatility',
-            'rsi_regime', 'bb_position', 'vsa_activity', 'vsa_direction'
+            'rsi_regime',
+            'ao_regime', # 🔥 НОВОЕ
+            'willr_regime' # 🔥 НОВОЕ
         ]
 
         # Добавляем xLSTM предсказания как фичи режима
@@ -90,7 +107,9 @@ class MarketRegimeDetector:
         # Нормализация и кластеризация
         features_to_scale = [
             'volatility', 'trend_strength', 'volume_trend', 'volume_volatility',
-            'rsi_regime', 'bb_position', 'vsa_activity', 'vsa_direction'
+            'rsi_regime',
+            'ao_regime', # 🔥 НОВОЕ
+            'willr_regime' # 🔥 НОВОЕ
         ]
         if 'xlstm_buy_pred' in features_df.columns:
             features_to_scale.extend(['xlstm_buy_pred', 'xlstm_sell_pred', 'xlstm_hold_pred'])
@@ -117,12 +136,10 @@ class MarketRegimeDetector:
             if len(cluster_data) > 0:
                 avg_volatility = cluster_data['volatility'].mean()
                 avg_trend = cluster_data['trend_strength'].mean()
-                avg_vsa_activity = cluster_data['vsa_activity'].mean()
                 
                 print(f"\nРежим {cluster} ({self.regime_names.get(cluster, 'UNKNOWN')}):")
                 print(f"  - Волатильность: {avg_volatility:.4f}")
                 print(f"  - Сила тренда: {avg_trend:.4f}")
-                print(f"  - VSA активность: {avg_vsa_activity:.4f}")
                 print(f"  - Количество периодов: {len(cluster_data)}")
     
     def predict_regime(self, df):
@@ -138,7 +155,9 @@ class MarketRegimeDetector:
         # Берем последние признаки
         features_to_predict = [
             'volatility', 'trend_strength', 'volume_trend', 'volume_volatility',
-            'rsi_regime', 'bb_position', 'vsa_activity', 'vsa_direction'
+            'rsi_regime',
+            'ao_regime', # 🔥 НОВОЕ
+            'willr_regime' # 🔥 НОВОЕ
         ]
         if 'xlstm_buy_pred' in features_df.columns:
             features_to_predict.extend(['xlstm_buy_pred', 'xlstm_sell_pred', 'xlstm_hold_pred'])

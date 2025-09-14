@@ -19,10 +19,10 @@ class TradingEnvRL(gym.Env):
         # Пространство действий: 0=SELL, 1=BUY, 2=HOLD
         self.action_space = gym.spaces.Discrete(3)
         
-        # Пространство наблюдений: xLSTM выход + VSA + портфель
-        # xLSTM выход (3) + VSA признаки (7) + портфель (4) = 14 признаков
+        # Пространство наблюдений: xLSTM выход + портфель
+        # xLSTM выход (3) + портфель (4) = 7 признаков
         self.observation_space = gym.spaces.Box(
-            low=-np.inf, high=np.inf, shape=(14,), dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(7,), dtype=np.float32
         )
         
         self.reset()
@@ -41,21 +41,6 @@ class TradingEnvRL(gym.Env):
         
         return self.xlstm_model.predict(features_reshaped)[0]
     
-    def _get_vsa_features(self):
-        """Получает текущие VSA признаки"""
-        if self.current_step >= len(self.df):
-            return np.zeros(7)
-            
-        current_row = self.df.iloc[self.current_step]
-        return np.array([
-            current_row['vsa_no_demand'],
-            current_row['vsa_no_supply'], 
-            current_row['vsa_stopping_volume'],
-            current_row['vsa_climactic_volume'],
-            current_row['vsa_test'],
-            current_row['vsa_effort_vs_result'],
-            current_row['vsa_strength']
-        ])
     
     def _get_portfolio_state(self):
         """Получает состояние портфеля"""
@@ -69,10 +54,9 @@ class TradingEnvRL(gym.Env):
     def _get_observation(self):
         """Формирует полное наблюдение для RL агента"""
         xlstm_pred = self._get_xlstm_prediction()  # 3 элемента
-        vsa_features = self._get_vsa_features()    # 7 элементов  
         portfolio_state = self._get_portfolio_state()  # 4 элемента
         
-        return np.concatenate([xlstm_pred, vsa_features, portfolio_state]).astype(np.float32)
+        return np.concatenate([xlstm_pred, portfolio_state]).astype(np.float32)
     
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -83,15 +67,24 @@ class TradingEnvRL(gym.Env):
         self.unrealized_pnl = 0
         self.steps_in_position = 0
         
-        # Определяем колонки признаков (адаптируйте под ваши данные)
+        # 🔥 НОВЫЕ FEATURE_COLUMNS - ТОЛЬКО ИНДИКАТОРЫ (для RL среды)
         self.feature_columns = [
-            'RSI_14', 'MACD_12_26_9', 'BBL_20_2.0', 'BBM_20_2.0', 'BBU_20_2.0',
+            # ✅ ВСЕ ТЕХНИЧЕСКИЕ ИНДИКАТОРЫ (БЕЗ БОЛЛИНДЖЕРА И ATR_14)
+            'RSI_14', 'MACD_12_26_9', 'MACD_signal', 'MACD_hist',
             'ADX_14', 'STOCHk_14_3_3', 'STOCHd_14_3_3',
-            'ATR_14', # <--- ДОБАВЛЕНО
-            'CDLHAMMER', 'CDLENGULFING', 'CDLDOJI', 'CDLSHOOTINGSTAR',
-            'CDLHANGINGMAN', 'CDLMARUBOZU',
-            'vsa_no_demand', 'vsa_no_supply', 'vsa_stopping_volume',
-            'vsa_climactic_volume', 'vsa_test', 'vsa_effort_vs_result', 'vsa_strength'
+            'WILLR_14', # 🔥 НОВЫЙ ИНДИКАТОР
+            'AO_5_34',  # 🔥 НОВЫЙ ИНДИКАТОР
+            
+            # ❌ ВСЕ ПАТТЕРНЫ ЗАКОММЕНТИРОВАНЫ
+            # 'CDLHAMMER', 'CDLENGULFING', 'CDLDOJI', 'CDLSHOOTINGSTAR',
+            # 'CDLHANGINGMAN', 'CDLMARUBOZU',
+            # 'CDLINVERTEDHAMMER', 'CDLDRAGONFLYDOJI', 'CDLBELTHOLD',
+            # 'hammer_f', 'hangingman_f', 'engulfing_f', 'doji_f',
+            # 'shootingstar_f', 'bullish_marubozu_f',
+            # 'inverted_hammer_f', 'dragonfly_doji_f', 'bullish_pin_bar_f', 'bullish_belt_hold_f',
+            
+            # ✅ ОСТАВЛЯЕМ EVENT SAMPLING
+            'is_event'
         ]
         
         return self._get_observation(), {}
@@ -115,9 +108,8 @@ class TradingEnvRL(gym.Env):
         if action == 0:  # SELL
             if self.position == 1:  # Закрываем long
                 pnl = self.unrealized_pnl - (self.commission * 2)
-                vsa_features = self._get_vsa_features()
                 xlstm_pred_for_reward = self._get_xlstm_prediction()
-                reward = self._calculate_advanced_reward(action, pnl * 100, vsa_features, xlstm_pred_for_reward)
+                reward = self._calculate_advanced_reward(action, pnl * 100, xlstm_pred_for_reward)
                 self.balance *= (1 + pnl)
                 self.position = 0
                 self.steps_in_position = 0
@@ -130,9 +122,8 @@ class TradingEnvRL(gym.Env):
         elif action == 1:  # BUY
             if self.position == -1:  # Закрываем short
                 pnl = self.unrealized_pnl - (self.commission * 2)
-                vsa_features = self._get_vsa_features()
                 xlstm_pred_for_reward = self._get_xlstm_prediction()
-                reward = self._calculate_advanced_reward(action, pnl * 100, vsa_features, xlstm_pred_for_reward)
+                reward = self._calculate_advanced_reward(action, pnl * 100, xlstm_pred_for_reward)
                 self.balance *= (1 + pnl)
                 self.position = 0
                 self.steps_in_position = 0
@@ -156,29 +147,12 @@ class TradingEnvRL(gym.Env):
         done = self.current_step >= len(self.df) - 1
         
         return self._get_observation(), reward, done, False, {}
-    def _calculate_advanced_reward(self, action, pnl_pct, vsa_features, xlstm_prediction):
+    def _calculate_advanced_reward(self, action, pnl_pct, xlstm_prediction):
         """
-        Расширенная система наград с учетом качества сигналов
+        Advanced reward system for RL agent with VSA and xLSTM integration.
         """
         base_reward = pnl_pct if pnl_pct != 0 else 0
         
-        # Бонусы за качественные VSA сигналы (ОСЛАБЛЕНЫ ПОРОГИ)
-        vsa_bonus = 0
-        if action in [0, 1]: # SELL или BUY
-            # BUY (действие 1): если есть no_supply (vsa_features[1]) или stopping_volume (vsa_features[2])
-            if action == 1 and (vsa_features[1] > 0 or vsa_features[2] > 0 or vsa_features[6] > 0.2): # Добавлено: vsa_strength > 0.2
-                vsa_bonus = 2 # СНИЖЕНО с 3 до 2, чтобы не перевешивать PnL
-            # SELL (действие 0): если есть no_demand (vsa_features[0]) или climactic_volume (vsa_features[3])
-            elif action == 0 and (vsa_features[0] > 0 or vsa_features[3] > 0 or vsa_features[6] < -0.2): # Добавлено: vsa_strength < -0.2
-                vsa_bonus = 2 # СНИЖЕНО с 3 до 2
-
-        # Штраф за противоречащие VSA сигналы (ОСЛАБЛЕНЫ ПОРОГИ)
-        vsa_penalty = 0
-        if action == 1 and (vsa_features[0] > 0 or vsa_features[3] > 0 or vsa_features[6] < -0.5): # Усилен порог для penalization
-            vsa_penalty = -3 # СНИЖЕНО с -5 до -3
-        elif action == 0 and (vsa_features[1] > 0 or vsa_features[2] > 0 or vsa_features[6] > 0.5): # Усилен порог для penalization
-            vsa_penalty = -3 # СНИЖЕНО с -5 до -3
-
         # Бонус за скорость закрытия прибыльных позиций
         speed_bonus = 0
         if pnl_pct > 0 and self.steps_in_position < 20:
@@ -205,63 +179,69 @@ class TradingEnvRL(gym.Env):
         if self.balance < self.initial_balance * 0.9:
             base_reward -= 5
 
-        # =====================================================================
-        # НОВЫЙ БЛОК: СКОРРЕКТИРОВАННЫЙ БОНУС ЗА ИССЛЕДОВАНИЕ И ЭНТРОПИЮ
-        # =====================================================================
+        # СКОРРЕКТИРОВАННЫЙ БОНУС ЗА ИССЛЕДОВАНИЕ И ЭНТРОПИЮ
         exploration_bonus = 0
-        # Меньший, но все еще стимулирующий бонус
-        if action in [0, 1]: # Если действие - BUY или SELL
-            exploration_bonus = 0.2 # <--- ИЗМЕНЕНО с 0.5 на 0.2
+        if action in [0, 1]:
+            exploration_bonus = 0.2
         
         entropy_bonus = 0
-        # Ослабляем бонус за энтропию
         entropy = -np.sum(xlstm_prediction * np.log(xlstm_prediction + 1e-10))
         normalized_entropy = entropy / np.log(len(xlstm_prediction))
-        entropy_bonus = normalized_entropy * 0.2 # <--- ИЗМЕНЕНО с 0.5 на 0.2
-        # =====================================================================
-        # КОНЕЦ НОВОГО БЛОКА
-        # =====================================================================
+        entropy_bonus = normalized_entropy * 0.2
 
-        # =====================================================================
-        # НОВЫЙ БЛОК: ЯВНОЕ ВОЗНАГРАЖДЕНИЕ ЗА HOLD И ШТРАФ ЗА OVERTRADING
-        # =====================================================================
+        # НОВЫЙ КОД - Корректируем функцию наград для RL (более сбалансированное вознаграждение, с акцентом на HOLD)
         hold_reward = 0
         overtrading_penalty = 0
 
-        # Если действие HOLD
+        current_row = self.df.iloc[self.current_step]
+        # Используем индикаторы для определения "явного сигнала"
+        buy_signal_strength = (
+            (current_row.get('RSI_14', 50) < 30) +
+            (current_row.get('ADX_14', 0) > 25) +
+            (current_row.get('MACD_hist', 0) > 0.001) +
+            (current_row.get('WILLR_14', -50) < -80) + # 🔥 НОВОЕ: WILLR_14 для BUY (сильно перепродано)
+            (current_row.get('AO_5_34', 0) > 0) # 🔥 НОВОЕ: AO выше нуля
+        )
+        sell_signal_strength = (
+            (current_row.get('RSI_14', 50) > 70) +
+            (current_row.get('ADX_14', 0) > 25) +
+            (current_row.get('MACD_hist', 0) < -0.001) +
+            (current_row.get('WILLR_14', -50) > -20) + # 🔥 НОВОЕ: WILLR_14 для SELL (сильно перекуплено)
+            (current_row.get('AO_5_34', 0) < 0) # 🔥 НОВОЕ: AO ниже нуля
+        )
+
         if action == 2: # HOLD
-            # Вознаграждаем за HOLD, если рынок действительно находится в консолидации
-            # (например, низкая волатильность, нет сильного тренда)
-            current_row = self.df.iloc[self.current_step]
-            volatility = current_row.get('ATR_14', 0) / current_row.get('close', 1) # Нормализованная волатильность
+            # 🔥 ИЗМЕНЕНО: Использование AO_5_34 и ADX_14 для HOLD reward
+            ao_value = current_row.get('AO_5_34', 0)
             adx = current_row.get('ADX_14', 0)
 
-            if volatility < 0.005 and adx < 25: # Низкая волатильность и слабый тренд
-                hold_reward = 0.5 # Небольшой бонус за правильный HOLD
-            elif volatility > 0.01 and adx > 30: # Высокая волатильность и сильный тренд - HOLD менее желателен
-                hold_reward = -0.5 # Небольшой штраф за HOLD в тренде
+            # Если моментум низкий (AO близко к 0) и ADX низкий (флэт)
+            if abs(ao_value) < 0.001 and adx < 20: # Пороги нужно будет подобрать
+                hold_reward = 0.5
+            # Если сильный моментум (большой AO) или сильный тренд (большой ADX)
+            elif abs(ao_value) > 0.005 or adx > 30:
+                hold_reward = -0.5
             else:
-                hold_reward = 0.1 # Небольшой нейтральный бонус за HOLD
+                hold_reward = 0.1
             
-            # Штраф за слишком долгое удержание позиции (если она убыточна)
             if pnl_pct < 0 and self.steps_in_position > 30:
-                hold_penalty = -3 # Уже есть, но убедимся, что он применяется к HOLD
+                hold_penalty = -3
             
+            # Добавляем бонус за HOLD, если нет сильных сигналов
+            if buy_signal_strength < 1 and sell_signal_strength < 1:
+                hold_reward += 1.0
+            else:
+                hold_reward -= 1.0
+
         else: # Если действие BUY или SELL (не HOLD)
             # Штраф за overtrading (слишком частые сделки, когда нет явного сигнала)
-            # Используем VSA-скор для определения "явного сигнала"
-            current_row = self.df.iloc[self.current_step]
-            vsa_buy_score = (0.3 * (current_row.get('vsa_no_supply', 0) == 1) + 0.3 * (current_row.get('vsa_stopping_volume', 0) == 1) + 0.4 * (current_row.get('vsa_strength', 0) > 0.1))
-            vsa_sell_score = (0.3 * (current_row.get('vsa_no_demand', 0) == 1) + 0.3 * (current_row.get('vsa_climactic_volume', 0) == 1) + 0.4 * (current_row.get('vsa_strength', 0) < -0.1))
-
-            if action == 1 and vsa_buy_score < 0.4: # Если BUY, но VSA-скор низкий
+            # Увеличиваем штраф за слабые BUY-сигналы, если RL предсказывает BUY
+            if action == 1 and buy_signal_strength < 2:
                 overtrading_penalty = -1.0
-            elif action == 0 and vsa_sell_score < 0.4: # Если SELL, но VSA-скор низкий
+            # Увеличиваем штраф за слабые SELL-сигналы, если RL предсказывает SELL
+            elif action == 0 and sell_signal_strength < 2:
                 overtrading_penalty = -1.0
-        # =====================================================================
-        # КОНЕЦ НОВОГО БЛОКА
-        # =====================================================================
 
-        total_reward = base_reward + vsa_bonus + vsa_penalty + speed_bonus + hold_penalty + exploration_bonus + entropy_bonus + hold_reward + overtrading_penalty # <--- ДОБАВЛЕНО: hold_reward, overtrading_penalty
+        total_reward = base_reward + speed_bonus + hold_penalty + exploration_bonus + entropy_bonus + hold_reward + overtrading_penalty
         
         return total_reward
