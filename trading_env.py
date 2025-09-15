@@ -1,247 +1,226 @@
-import gymnasium as gym
 import numpy as np
 import pandas as pd
-from typing import Dict, Any
+import gymnasium as gym
+from gymnasium import spaces
+# import logging # 🔥 УДАЛЕНО: Импорт logging
 
-class TradingEnvRL(gym.Env):
+class TradingEnvironment(gym.Env):
     """
-    Расширенная торговая среда для RL агента с VSA и xLSTM интеграцией
+    Среда для обучения торгового агента с помощью RL
     """
-    
-    def __init__(self, df: pd.DataFrame, xlstm_model, initial_balance=10000, commission=0.0008):
-        super(TradingEnvRL, self).__init__()
+    def __init__(self, data, sequence_length=60, initial_balance=10000, transaction_fee=0.001):
+        super(TradingEnvironment, self).__init__()
         
-        self.df = df.copy()
-        self.xlstm_model = xlstm_model
+        self.data = data  # Нормализованные данные
+        self.sequence_length = sequence_length
         self.initial_balance = initial_balance
-        self.commission = commission
+        self.transaction_fee = transaction_fee
         
-        # Пространство действий: 0=SELL, 1=BUY, 2=HOLD
-        self.action_space = gym.spaces.Discrete(3)
+        # Определяем пространство действий: 0 - BUY, 1 - HOLD, 2 - SELL
+        self.action_space = spaces.Discrete(3)
         
-        # Пространство наблюдений: xLSTM выход + портфель
-        # xLSTM выход (3) + портфель (4) = 7 признаков
-        self.observation_space = gym.spaces.Box(
-            low=-np.inf, high=np.inf, shape=(7,), dtype=np.float32
+        # Пространство наблюдений: только последовательность цен и объемов БЕЗ позиции
+        # Используем исходную форму данных
+        self.observation_space = spaces.Box(
+            low=-np.inf,
+            high=np.inf,
+            shape=(self.sequence_length, self.data.shape[2])
         )
         
+        # 🔥 УДАЛЕНО: Инициализация логгера
+        # self.logger = logging.getLogger('trading_env')
+        
+        # Сбрасываем среду
         self.reset()
     
-    def _get_xlstm_prediction(self):
-        """Получает предсказание от xLSTM модели"""
-        if self.current_step < 10:  # Нужно минимум 10 свечей для последовательности
-            return np.array([0.33, 0.33, 0.34])  # Равномерное распределение
-        
-        # Берем последние 10 свечей для xLSTM
-        sequence_data = self.df.iloc[self.current_step-10:self.current_step]
-        
-        # Подготавливаем данные для модели (нужно адаптировать под ваши признаки)
-        features = sequence_data[self.feature_columns].values
-        features_reshaped = features.reshape(1, 10, len(self.feature_columns))
-        
-        return self.xlstm_model.predict(features_reshaped)[0]
-    
-    
-    def _get_portfolio_state(self):
-        """Получает состояние портфеля"""
-        return np.array([
-            self.balance / self.initial_balance,  # Нормализованный баланс
-            self.position,  # -1, 0, 1
-            self.unrealized_pnl / self.initial_balance if self.position != 0 else 0,
-            self.steps_in_position / 100.0  # Нормализованное время в позиции
-        ])
-    
-    def _get_observation(self):
-        """Формирует полное наблюдение для RL агента"""
-        xlstm_pred = self._get_xlstm_prediction()  # 3 элемента
-        portfolio_state = self._get_portfolio_state()  # 4 элемента
-        
-        return np.concatenate([xlstm_pred, portfolio_state]).astype(np.float32)
-    
-    def reset(self, seed=None, options=None):
+    def reset(self, seed=None):
+        """Сбрасывает среду в начальное состояние"""
         super().reset(seed=seed)
-        self.current_step = 10  # Начинаем с 10-й свечи для xLSTM
+        
+        self.current_step = 0
         self.balance = self.initial_balance
-        self.position = 0  # -1=short, 0=flat, 1=long
-        self.entry_price = 0
-        self.unrealized_pnl = 0
-        self.steps_in_position = 0
+        self.position = 0  # 0 - нет позиции, 1 - длинная позиция, -1 - короткая позиция
+        self.shares_held = 0
+        self.cost_basis = 0
+        self.total_trades = 0
+        self.total_profit = 0
         
-        # 🔥 НОВЫЕ FEATURE_COLUMNS - ТОЛЬКО ИНДИКАТОРЫ (для RL среды)
-        self.feature_columns = [
-            # ✅ ВСЕ ТЕХНИЧЕСКИЕ ИНДИКАТОРЫ (БЕЗ БОЛЛИНДЖЕРА И ATR_14)
-            'RSI_14', 'MACD_12_26_9', 'MACD_signal', 'MACD_hist',
-            'ADX_14', 'STOCHk_14_3_3', 'STOCHd_14_3_3',
-            'WILLR_14', # 🔥 НОВЫЙ ИНДИКАТОР
-            'AO_5_34',  # 🔥 НОВЫЙ ИНДИКАТОР
-            
-            # ❌ ВСЕ ПАТТЕРНЫ ЗАКОММЕНТИРОВАНЫ
-            # 'CDLHAMMER', 'CDLENGULFING', 'CDLDOJI', 'CDLSHOOTINGSTAR',
-            # 'CDLHANGINGMAN', 'CDLMARUBOZU',
-            # 'CDLINVERTEDHAMMER', 'CDLDRAGONFLYDOJI', 'CDLBELTHOLD',
-            # 'hammer_f', 'hangingman_f', 'engulfing_f', 'doji_f',
-            # 'shootingstar_f', 'bullish_marubozu_f',
-            # 'inverted_hammer_f', 'dragonfly_doji_f', 'bullish_pin_bar_f', 'bullish_belt_hold_f',
-            
-            # ✅ ОСТАВЛЯЕМ EVENT SAMPLING
-            'is_event'
-        ]
+        # Добавляем информацию о позиции к наблюдению
+        observation = self._get_observation()
         
-        return self._get_observation(), {}
+        return observation, {}
     
     def step(self, action):
-        if self.current_step >= len(self.df) - 1:
-            return self._get_observation(), 0, True, False, {}
+        """Выполняет шаг в среде"""
+        # Проверяем корректность шага
+        if self.current_step >= len(self.data) - 1:
+            # Эпизод уже закончен
+            observation = self._get_observation() if self.current_step < len(self.data) else self.data[-1].copy()
+            info = {
+                'balance': float(self.balance),
+                'position': self.position,
+                'shares_held': float(self.shares_held),
+                'total_trades': self.total_trades,
+                'total_profit': float(self.total_profit),
+                'portfolio_value': float(self.balance)
+            }
+            return observation, 0.0, True, False, info
+        
+        # Получаем текущую цену закрытия
+        current_price = self._get_current_price()
+        
+        # Ограничиваем размер позиции для избежания переполнения
+        max_position_size = self.initial_balance * 0.95  # Максимум 95% от начального баланса
+        
+        reward = 0
+        if action == 0:  # BUY
+            if self.position != 1 and self.balance > 0:
+                if self.position == -1:
+                    reward += self._close_position(current_price)
+                
+                # Ограничиваем размер покупки
+                max_shares = min(max_position_size / current_price, self.balance / (current_price * (1 + self.transaction_fee)))
+                shares_to_buy = max_shares * 0.9  # Используем только 90% доступных средств
+                
+                if shares_to_buy > 0:
+                    cost = shares_to_buy * current_price * (1 + self.transaction_fee)
+                    
+                    if cost <= self.balance:
+                        self.balance -= cost
+                        self.shares_held = shares_to_buy
+                        self.cost_basis = current_price
+                        self.position = 1
+                        self.total_trades += 1
+        
+        elif action == 2:  # SELL
+            if self.position != -1 and self.balance > 0:
+                if self.position == 1:
+                    reward += self._close_position(current_price)
+                
+                # Ограничиваем размер продажи
+                max_shares = min(max_position_size / current_price, self.balance / current_price)
+                shares_to_sell = max_shares * 0.9  # Используем только 90% доступных средств
+                
+                if shares_to_sell > 0:
+                    self.shares_held = -shares_to_sell
+                    self.cost_basis = current_price
+                    self.position = -1
+                    self.total_trades += 1
+        
+        # Переходим к следующему шагу
+        self.current_step += 1
+        
+        # Проверяем, закончился ли эпизод
+        done = self.current_step >= len(self.data) - 1
+        
+        # Если эпизод закончился, закрываем все открытые позиции
+        if done and self.position != 0:
+            reward += self._close_position(current_price)
+        
+        # Получаем новое наблюдение
+        observation = self._get_observation()
+        
+        # Рассчитываем стоимость портфеля с проверкой на переполнение
+        portfolio_value = self.balance
+        
+        # Проверяем на NaN и бесконечность
+        if np.isnan(self.balance) or np.isinf(self.balance):
+            self.balance = self.initial_balance
+            portfolio_value = self.initial_balance
+            reward = -1.0  # Штраф за переполнение
+        
+        if self.position == 1 and self.shares_held > 0:
+            position_value = self.shares_held * current_price
+            if not (np.isnan(position_value) or np.isinf(position_value)):
+                portfolio_value += position_value
+        elif self.position == -1 and self.shares_held < 0:
+            position_value = -self.shares_held * current_price
+            if not (np.isnan(position_value) or np.isinf(position_value)):
+                portfolio_value -= position_value
+        
+        # Ограничиваем портфель разумными значениями
+        if portfolio_value > self.initial_balance * 1000:  # Максимум в 1000 раз больше начального
+            portfolio_value = self.initial_balance * 1000
+            reward = -0.5  # Штраф за слишком большой рост
+        elif portfolio_value < self.initial_balance * 0.001:  # Минимум 0.1% от начального
+            portfolio_value = self.initial_balance * 0.001
+            reward = -0.5  # Штраф за большие потери
+        
+        # Дополнительная информация
+        info = {
+            'balance': float(self.balance) if not (np.isnan(self.balance) or np.isinf(self.balance)) else float(self.initial_balance),
+            'position': self.position,
+            'shares_held': float(self.shares_held) if not (np.isnan(self.shares_held) or np.isinf(self.shares_held)) else 0.0,
+            'total_trades': self.total_trades,
+            'total_profit': float(self.total_profit) if not (np.isnan(self.total_profit) or np.isinf(self.total_profit)) else 0.0,
+            'portfolio_value': float(portfolio_value)
+        }
+        
+        return observation, reward, done, False, info
+
+    def _get_observation(self):
+        """Возвращает текущее наблюдение"""
+        # Возвращаем только последовательность данных БЕЗ информации о позиции
+        obs = self.data[self.current_step].copy()
+        return obs
+    
+    def _get_current_price(self):
+        """Возвращает текущую цену закрытия"""
+        try:
+            price = self.data[self.current_step][-1, 3]  # индекс 3 - это 'close'
             
-        current_price = self.df['close'].iloc[self.current_step]
+            # Проверяем на корректность цены
+            if np.isnan(price) or np.isinf(price) or price <= 0:
+                # Возвращаем предыдущую цену или базовую цену
+                if self.current_step > 0:
+                    return self.data[self.current_step-1][-1, 3]
+                else:
+                    return 100.0  # Базовая цена
+            
+            return price
+        except (IndexError, ValueError):
+            return 100.0  # Базовая цена в случае ошибки
+    
+    def _close_position(self, current_price):
+        """Закрывает текущую позицию и возвращает полученную награду"""
         reward = 0
         
-        # Обновляем нереализованный PnL
-        if self.position != 0:
-            if self.position == 1:  # Long
-                self.unrealized_pnl = (current_price - self.entry_price) / self.entry_price
-            else:  # Short
-                self.unrealized_pnl = (self.entry_price - current_price) / self.entry_price
-            self.steps_in_position += 1
-        
-        # Выполняем действие
-        if action == 0:  # SELL
-            if self.position == 1:  # Закрываем long
-                pnl = self.unrealized_pnl - (self.commission * 2)
-                xlstm_pred_for_reward = self._get_xlstm_prediction()
-                reward = self._calculate_advanced_reward(action, pnl * 100, xlstm_pred_for_reward)
-                self.balance *= (1 + pnl)
-                self.position = 0
-                self.steps_in_position = 0
-                    
-            elif self.position == 0:  # Открываем short
-                self.position = -1
-                self.entry_price = current_price
-                self.steps_in_position = 0
+        try:
+            if self.position == 1 and self.shares_held > 0:  # Закрываем длинную позицию
+                profit = self.shares_held * (current_price - self.cost_basis)
+                fee = self.shares_held * current_price * self.transaction_fee
                 
-        elif action == 1:  # BUY
-            if self.position == -1:  # Закрываем short
-                pnl = self.unrealized_pnl - (self.commission * 2)
-                xlstm_pred_for_reward = self._get_xlstm_prediction()
-                reward = self._calculate_advanced_reward(action, pnl * 100, xlstm_pred_for_reward)
-                self.balance *= (1 + pnl)
-                self.position = 0
-                self.steps_in_position = 0
-                    
-            elif self.position == 0:  # Открываем long
-                self.position = 1
-                self.entry_price = current_price
-                self.steps_in_position = 0
+                # Проверяем на переполнение
+                if not (np.isnan(profit) or np.isinf(profit) or np.isnan(fee) or np.isinf(fee)):
+                    self.balance += self.shares_held * current_price - fee
+                    reward = np.clip(profit / self.initial_balance, -10.0, 10.0)  # Ограничиваем награду
+                    self.total_profit += profit
+            
+            elif self.position == -1 and self.shares_held < 0:  # Закрываем короткую позицию
+                profit = -self.shares_held * (self.cost_basis - current_price)
+                fee = -self.shares_held * current_price * self.transaction_fee
                 
-        else:  # HOLD
-            if self.position == 0:
-                reward = -0.1  # Небольшой штраф за бездействие
-            else:
-                # Штраф за слишком долгое удержание позиции
-                if self.steps_in_position > 50:
-                    reward = -2
-                else:
-                    reward = self.unrealized_pnl * 10  # Поощряем прибыльные позиции
-        
-        self.current_step += 1
-        done = self.current_step >= len(self.df) - 1
-        
-        return self._get_observation(), reward, done, False, {}
-    def _calculate_advanced_reward(self, action, pnl_pct, xlstm_prediction):
-        """
-        Advanced reward system for RL agent with VSA and xLSTM integration.
-        """
-        base_reward = pnl_pct if pnl_pct != 0 else 0
-        
-        # Бонус за скорость закрытия прибыльных позиций
-        speed_bonus = 0
-        if pnl_pct > 0 and self.steps_in_position < 20:
-            speed_bonus = 2
-
-        # Штраф за долгое удержание убыточных позиций
-        hold_penalty = 0
-        if pnl_pct < 0 and self.steps_in_position > 30:
-            hold_penalty = -3
-
-        # Бонус за уверенность xLSTM
-        xlstm_conf = np.max(xlstm_prediction)
-        if xlstm_conf > 0.7:
-            base_reward += xlstm_conf * 2
-
-        # Штраф за противоречие xLSTM
-        predicted_action_idx = np.argmax(xlstm_prediction)
-        xlstm_to_rl_map = {0: 1, 1: 0, 2: 2}  # xLSTM_BUY->RL_BUY, xLSTM_SELL->RL_SELL
-        
-        if action != 2 and action != xlstm_to_rl_map.get(predicted_action_idx):
-            base_reward -= 1
-
-        # Штраф за отклонение от баланса (риск-менеджмент)
-        if self.balance < self.initial_balance * 0.9:
-            base_reward -= 5
-
-        # СКОРРЕКТИРОВАННЫЙ БОНУС ЗА ИССЛЕДОВАНИЕ И ЭНТРОПИЮ
-        exploration_bonus = 0
-        if action in [0, 1]:
-            exploration_bonus = 0.2
-        
-        entropy_bonus = 0
-        entropy = -np.sum(xlstm_prediction * np.log(xlstm_prediction + 1e-10))
-        normalized_entropy = entropy / np.log(len(xlstm_prediction))
-        entropy_bonus = normalized_entropy * 0.2
-
-        # НОВЫЙ КОД - Корректируем функцию наград для RL (более сбалансированное вознаграждение, с акцентом на HOLD)
-        hold_reward = 0
-        overtrading_penalty = 0
-
-        current_row = self.df.iloc[self.current_step]
-        # Используем индикаторы для определения "явного сигнала"
-        buy_signal_strength = (
-            (current_row.get('RSI_14', 50) < 30) +
-            (current_row.get('ADX_14', 0) > 25) +
-            (current_row.get('MACD_hist', 0) > 0.001) +
-            (current_row.get('WILLR_14', -50) < -80) + # 🔥 НОВОЕ: WILLR_14 для BUY (сильно перепродано)
-            (current_row.get('AO_5_34', 0) > 0) # 🔥 НОВОЕ: AO выше нуля
-        )
-        sell_signal_strength = (
-            (current_row.get('RSI_14', 50) > 70) +
-            (current_row.get('ADX_14', 0) > 25) +
-            (current_row.get('MACD_hist', 0) < -0.001) +
-            (current_row.get('WILLR_14', -50) > -20) + # 🔥 НОВОЕ: WILLR_14 для SELL (сильно перекуплено)
-            (current_row.get('AO_5_34', 0) < 0) # 🔥 НОВОЕ: AO ниже нуля
-        )
-
-        if action == 2: # HOLD
-            # 🔥 ИЗМЕНЕНО: Использование AO_5_34 и ADX_14 для HOLD reward
-            ao_value = current_row.get('AO_5_34', 0)
-            adx = current_row.get('ADX_14', 0)
-
-            # Если моментум низкий (AO близко к 0) и ADX низкий (флэт)
-            if abs(ao_value) < 0.001 and adx < 20: # Пороги нужно будет подобрать
-                hold_reward = 0.5
-            # Если сильный моментум (большой AO) или сильный тренд (большой ADX)
-            elif abs(ao_value) > 0.005 or adx > 30:
-                hold_reward = -0.5
-            else:
-                hold_reward = 0.1
+                # Проверяем на переполнение
+                if not (np.isnan(profit) or np.isinf(profit) or np.isnan(fee) or np.isinf(fee)):
+                    self.balance += profit - fee
+                    reward = np.clip(profit / self.initial_balance, -10.0, 10.0)  # Ограничиваем награду
+                    self.total_profit += profit
             
-            if pnl_pct < 0 and self.steps_in_position > 30:
-                hold_penalty = -3
+            # Проверяем баланс на разумность
+            if np.isnan(self.balance) or np.isinf(self.balance) or self.balance <= 0:
+                self.balance = self.initial_balance * 0.1  # Минимальный баланс
+                reward = -1.0  # Штраф за банкротство
             
-            # Добавляем бонус за HOLD, если нет сильных сигналов
-            if buy_signal_strength < 1 and sell_signal_strength < 1:
-                hold_reward += 1.0
-            else:
-                hold_reward -= 1.0
-
-        else: # Если действие BUY или SELL (не HOLD)
-            # Штраф за overtrading (слишком частые сделки, когда нет явного сигнала)
-            # Увеличиваем штраф за слабые BUY-сигналы, если RL предсказывает BUY
-            if action == 1 and buy_signal_strength < 2:
-                overtrading_penalty = -1.0
-            # Увеличиваем штраф за слабые SELL-сигналы, если RL предсказывает SELL
-            elif action == 0 and sell_signal_strength < 2:
-                overtrading_penalty = -1.0
-
-        total_reward = base_reward + speed_bonus + hold_penalty + exploration_bonus + entropy_bonus + hold_reward + overtrading_penalty
+        except (OverflowError, ValueError) as e:
+            # В случае переполнения сбрасываем к безопасным значениям
+            self.balance = self.initial_balance
+            reward = -1.0
+            # 🔥 ИЗМЕНЕНО: self.logger.warning -> print
+            print(f"Переполнение при закрытии позиции: {e}")
         
-        return total_reward
+        # Сбрасываем позицию
+        self.shares_held = 0
+        self.cost_basis = 0
+        self.position = 0
+        
+        return reward

@@ -1,3 +1,5 @@
+Проблема в том, что в методе get_initial_state в xlstm_memory_cell.py параметр dtype может быть None, что вызывает ошибку при создании тензора. Нужно исправить этот метод.
+Вот исправленный код для models/xlstm_memory_cell.py:
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras import layers
@@ -119,3 +121,38 @@ class XLSTMMemoryCell(layers.Layer):
             'memory_size': self.memory_size
         })
         return config
+
+Основные изменения в методе get_initial_state:
+
+Проверка batch_size: Если batch_size не задан и нет inputs, устанавливается значение по умолчанию 1
+Проверка dtype: Если dtype равен None, устанавливается tf.float32 по умолчанию
+Безопасное создание тензоров: Теперь всегда передается корректный dtype в tf.zeros
+
+Также можно добавить дополнительную проверку в models/xlstm_rl_model.py для метода predict_action:
+def predict_action(self, state):
+    """Предсказывает действие на основе состояния"""
+    # Убеждаемся, что state имеет правильную форму и тип данных
+    if len(state.shape) == 2:
+        state = np.expand_dims(state, axis=0)
+    
+    # Преобразуем в float32, если это не так
+    if state.dtype != np.float32:
+        state = state.astype(np.float32)
+    
+    action_probs = self.actor_model.predict(state, verbose=0)[0]
+    return action_probs
+
+def predict_value(self, state):
+    """Предсказывает значение состояния"""
+    # Убеждаемся, что state имеет правильную форму и тип данных
+    if len(state.shape) == 2:
+        state = np.expand_dims(state, axis=0)
+    
+    # Преобразуем в float32, если это не так
+    if state.dtype != np.float32:
+        state = state.astype(np.float32)
+    
+    value = self.critic_model.predict(state, verbose=0)[0]
+    return value
+
+Эти изменения должны устранить ошибку TypeError: Cannot convert the argument type_value: None to a TensorFlow DType.

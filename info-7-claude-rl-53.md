@@ -1,3 +1,8 @@
+Давайте заменим все вызовы logger.info() и logger.error() на print() в файле train_model.py.
+
+Вот обновленный train_model.py с заменой logger на print:
+
+
 import os
 import sys
 import logging # Оставляем для настройки других логгеров, но не используем напрямую
@@ -153,7 +158,7 @@ class ThreeStageTrainer:
         self.feature_eng.save_scaler()
         
         # Инициализируем модель
-        input_shape = (config.SEQUENCE_LENGTH, len(self.feature_eng.feature_columns))
+        input_shape = (config.SEQUENCE_LENGTH, X.shape[2])
         self.model = XLSTMRLModel(
             input_shape=input_shape,
             memory_size=config.XLSTM_MEMORY_SIZE,
@@ -305,7 +310,7 @@ class ThreeStageTrainer:
         
         # Создаём RL агента с предобученными моделями
         rl_agent = RLAgent(
-            state_shape=(config.SEQUENCE_LENGTH, len(self.feature_eng.feature_columns)),
+            state_shape=(config.SEQUENCE_LENGTH, self.X_train.shape[2]),
             memory_size=config.XLSTM_MEMORY_SIZE,
             memory_units=config.XLSTM_MEMORY_UNITS,
             batch_size=config.RL_BATCH_SIZE

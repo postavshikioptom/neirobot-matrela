@@ -69,7 +69,7 @@ python run_live_trading.py
 python trade_statistics.py - показывает всю статистику модели за последние 100 сделок на Bybit торговле
 python lime_analytics.py - аналитика отдельных сделок по логам торгов. Запускать отдельно после обучения.
 РАЗ В НЕДЕЛЮ ОБУЧАТь на новых исторических данных свечей (старые весы храняться, а на новых данных их чуть корректирует)
-python train_model.py - обучение matrela
+python train_model.py -  новое 3-хэтапное обучение xLSTM + RL
 python train_model.py --model all  - обучение LSTM и xLSTM
 python train_model.py --model xlstm_indicator - обучение только одной модели
 
@@ -77,6 +77,8 @@ python train_model.py --model xlstm_indicator - обучение только о
 СИМУЛЯЦИИ (торговля по подной монете за раз, типа нам ее передал Скринер, можно любую монету выбрать)
 simulation_engine_advanced.py
 python run_simulation.py --symbol ALGOUSDT --mode LSTM_only
+python visual_graph.py --data historical_data.csv --symbol ADAUSDT 
+
 
 
 python test_patterns.py - проверка паттернов на работоспособность
@@ -114,7 +116,7 @@ Websocket: wss://stream-testnet.bybit.com
 
 RSI (Relative Strength Index)
 MACD (Moving Average Convergence Divergence)
-Боллинджер (Bollinger Bands)
+
 ADX (Average Directional Index)
 Стохастик
 
@@ -130,11 +132,13 @@ xLSTM + RL- одна модель для всего с машинным обуч
 
 # ЗАМЕНА ИНДИКАТОРОВ ДЛЯ XLSTM(постоянно менять)
 ## ВЫКЛЮЧИЛ Индикаторы
-BBL_20_2, BBM_20_2, BBU_20_2 - отрицательный и для BUY и для SELL показывает
+Боллинджер (Bollinger Bands) BBL_20_2, BBM_20_2, BBU_20_2 - отрицательный и для BUY и для SELL показывает
 ATR_14 - все время отрицательный и BUY и SELL
 
 
 ## Добавил индикаторы
+RSI (Relative Strength Index)
+MACD (Moving Average Convergence Divergence)
 Williams %R (WILLR_14)
 AO (Awesome Oscillator)
 

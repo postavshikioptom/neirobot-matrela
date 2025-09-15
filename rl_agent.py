@@ -1,124 +1,163 @@
-from stable_baselines3 import PPO, SAC, A2C
-from stable_baselines3.common.env_util import make_vec_env
-from stable_baselines3.common.callbacks import EvalCallback, StopTrainingOnRewardThreshold
-from stable_baselines3.common.vec_env import DummyVecEnv
 import numpy as np
-import pandas as pd
-from trading_env import TradingEnvRL
-import torch
+import tensorflow as tf
+from models.xlstm_rl_model import XLSTMRLModel
+import os
+# import logging # 🔥 УДАЛЕНО: Импорт logging
 
-class IntelligentRLAgent:
+class RLAgent:
     """
-    Интеллектуальный RL агент с адаптивным обучением
+    Агент Reinforcement Learning для торговли - ПОДДЕРЖКА ТРЁХЭТАПНОГО ОБУЧЕНИЯ
     """
+    def __init__(self, state_shape, memory_size=64, memory_units=128, gamma=0.99, epsilon=0.3, epsilon_min=0.1, epsilon_decay=0.995, batch_size=64):
+        self.state_shape = state_shape
+        self.gamma = gamma  # Коэффициент дисконтирования
+        # 🔥 ИЗМЕНЕНО: Начальный epsilon ниже для fine-tuning предобученной модели
+        self.epsilon = epsilon  # Начинаем с меньшего epsilon для fine-tuning
+        self.epsilon_min = epsilon_min
+        self.epsilon_decay = epsilon_decay
+        self.batch_size = batch_size
+        
+        # Инициализация модели
+        self.model = XLSTMRLModel(input_shape=state_shape, 
+                                 memory_size=memory_size, 
+                                 memory_units=memory_units)
+        
+        # Буфер опыта
+        self.memory = []
+        self.max_memory_size = 10000
+        
+        # 🔥 УДАЛЕНО: Инициализация логгера
+        # self.logger = logging.getLogger('rl_agent')
+        # self.logger.setLevel(logging.INFO)
+        # if not self.logger.handlers:
+        #     handler = logging.StreamHandler()
+        #     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        #     handler.setFormatter(formatter)
+        #     self.logger.addHandler(handler)
     
-    def __init__(self, algorithm='PPO'):
-        self.algorithm = algorithm
-        self.model = None
-        self.training_env = None
-        self.eval_env = None
+    def act(self, state, training=True):
+        """Выбирает действие на основе текущего состояния"""
+        if training and np.random.rand() < self.epsilon:
+            # Случайное действие во время обучения
+            return np.random.randint(0, 3)
         
-    def create_training_environment(self, train_df, xlstm_model):
-        """Создает среду для обучения"""
-        self.training_env = TradingEnvRL(train_df, xlstm_model)
-        return DummyVecEnv([lambda: self.training_env])
+        # Получаем вероятности действий от модели актора
+        action_probs = self.model.predict_action(state)
         
-    def create_evaluation_environment(self, eval_df, xlstm_model):
-        """Создает среду для оценки"""
-        self.eval_env = TradingEnvRL(eval_df, xlstm_model)
-        return self.eval_env
+        # Выбираем действие с наибольшей вероятностью
+        return np.argmax(action_probs)
     
-    def build_agent(self, vec_env):
-        """Строит RL агента с оптимизированными гиперпараметрами"""
+    def remember(self, state, action, reward, next_state, done):
+        """Сохраняет опыт в буфер"""
+        self.memory.append((state, action, reward, next_state, done))
         
-        if self.algorithm == 'PPO':
-            # Оптимизированные гиперпараметры для торговли
-            self.model = PPO(
-                'MlpPolicy',
-                vec_env,
-                learning_rate=0.0003,
-                n_steps=2048,
-                batch_size=64,
-                n_epochs=10,
-                gamma=0.99,
-                gae_lambda=0.95,
-                clip_range=0.2,
-                ent_coef=0.05, # <--- ИЗМЕНЕНО с 0.03 на 0.05 (увеличиваем энтропию еще больше)
-                vf_coef=0.5,
-                max_grad_norm=0.5,
-                policy_kwargs=dict(
-                    net_arch=dict(pi=[256, 128, 64], vf=[256, 128, 64]),
-                    activation_fn=torch.nn.ReLU
-                ),
-                verbose=0, # <-- ИЗМЕНЕНО: 0 для отключения детального логирования
-                tensorboard_log="./tensorboard_logs/",
-                progress_bar=False # <-- ДОБАВЛЕНО: отключаем прогресс-бар
-            )
+        # Ограничиваем размер буфера
+        if len(self.memory) > self.max_memory_size:
+            self.memory.pop(0)
+    
+    def update_epsilon(self):
+        """Обновляет значение epsilon для исследования"""
+        if self.epsilon > self.epsilon_min:
+            self.epsilon *= self.epsilon_decay
+    
+    def train(self):
+        """Обучает модель на основе сохраненного опыта"""
+        if len(self.memory) < self.batch_size:
+            return None
+        
+        # Выбираем случайные примеры из буфера
+        indices = np.random.choice(len(self.memory), self.batch_size, replace=False)
+        batch = [self.memory[i] for i in indices]
+        
+        states = np.array([experience[0] for experience in batch])
+        actions = np.array([experience[1] for experience in batch])
+        rewards = np.array([experience[2] for experience in batch])
+        next_states = np.array([experience[3] for experience in batch])
+        dones = np.array([experience[4] for experience in batch])
+        
+        # Обучение модели критика
+        with tf.GradientTape() as tape:
+            # Предсказываем значения текущих состояний
+            values = self.model.critic_model(states, training=True)
             
-        elif self.algorithm == 'SAC':
-            self.model = SAC(
-                'MlpPolicy',
-                vec_env,
-                learning_rate=0.0003,
-                buffer_size=100000,
-                learning_starts=1000,
-                batch_size=256,
-                tau=0.005,
-                gamma=0.99,
-                train_freq=1,
-                gradient_steps=1,
-                ent_coef='auto', # Можно оставить 'auto' или задать конкретное значение, например, 0.03
-                policy_kwargs=dict(net_arch=[256, 256]),
-                verbose=0, # <-- ИЗМЕНЕНО: 0 для отключения детального логирования
-                tensorboard_log="./tensorboard_logs/",
-                progress_bar=False # <-- ДОБАВЛЕНО: отключаем прогресс-бар
-            )
+            # Предсказываем значения следующих состояний
+            next_values = self.model.critic_model(next_states, training=True)
             
-        return self.model
+            # Вычисляем целевые значения
+            targets = rewards + self.gamma * tf.squeeze(next_values) * (1 - dones)
+            targets = tf.expand_dims(targets, axis=1)
+            
+            # Вычисляем функцию потерь
+            critic_loss = tf.reduce_mean(tf.square(targets - values))
+        
+        # Применяем градиенты для критика
+        critic_grads = tape.gradient(critic_loss, self.model.critic_model.trainable_variables)
+        self.model.critic_optimizer.apply_gradients(zip(critic_grads, self.model.critic_model.trainable_variables))
+        
+        # Обучение модели актора
+        with tf.GradientTape() as tape:
+            # Предсказываем вероятности действий
+            action_probs = self.model.actor_model(states, training=True)
+            
+            # Создаем one-hot вектор для выбранных действий
+            action_masks = tf.one_hot(actions, 3)
+            
+            # Предсказываем значения состояний
+            values = self.model.critic_model(states, training=True)
+            
+            # Вычисляем преимущество (advantage)
+            advantages = targets - values
+            
+            # Вычисляем функцию потерь актора
+            selected_action_probs = tf.reduce_sum(action_probs * action_masks, axis=1)
+            log_probs = tf.math.log(selected_action_probs + 1e-10)
+            actor_loss = -tf.reduce_mean(log_probs * tf.squeeze(advantages))
+            
+            # Добавляем регуляризацию энтропии
+            entropy = -tf.reduce_sum(action_probs * tf.math.log(action_probs + 1e-10), axis=1)
+            actor_loss -= 0.01 * tf.reduce_mean(entropy)
+        
+        # Применяем градиенты для актора
+        actor_grads = tape.gradient(actor_loss, self.model.actor_model.trainable_variables)
+        self.model.actor_optimizer.apply_gradients(zip(actor_grads, self.model.actor_model.trainable_variables))
+        
+        return {
+            'critic_loss': float(critic_loss),
+            'actor_loss': float(actor_loss),
+            'mean_value': float(tf.reduce_mean(values)),
+            'mean_reward': float(np.mean(rewards))
+        }
     
-    def train_with_callbacks(self, total_timesteps=100000, eval_freq=5000):
-        """Обучение с колбэками для раннего останова"""
-        
-        # Колбэк для остановки при достижении целевой награды
-        stop_callback = StopTrainingOnRewardThreshold(
-            reward_threshold=200,  # Остановка при средней награде 200
-            verbose=1
-        )
-        
-        # Колбэк для периодической оценки
-        eval_callback = EvalCallback(
-            self.eval_env,
-            best_model_save_path='./models/rl_best_model',
-            log_path='./logs/rl_evaluation',
-            eval_freq=eval_freq,
-            deterministic=True,
-            render=False,
-            callback_on_new_best=stop_callback
-        )
-        
-        # Обучение
-        self.model.learn(
-            total_timesteps=total_timesteps,
-            callback=eval_callback,
-            progress_bar=False # <-- ИЗМЕНЕНО
-        )
-        
-        return self.model
+    def save(self, path='models'):
+        """Сохраняет модель"""
+        self.model.save(path, stage="_rl_final")
     
-    def save_agent(self, path='models/rl_agent'):
-        """Сохранение агента"""
-        self.model.save(path)
-        print(f"RL агент сохранен: {path}")
+    def load(self, path='models'):
+        """Загружает модель"""
+        self.model.load(path, stage="_rl_finetuned")
+    
+    def log_action_distribution(self, states):
+        """Логирует распределение действий для набора состояний"""
+        if len(states) == 0:
+            return {'buy_count': 0, 'hold_count': 0, 'sell_count': 0, 'total': 0}
         
-    def load_agent(self, path='models/rl_agent'):
-        """Загрузка агента"""
-        if self.algorithm == 'PPO':
-            self.model = PPO.load(path)
-        elif self.algorithm == 'SAC':
-            self.model = SAC.load(path)
-        print(f"RL агент загружен: {path}")
+        actions = []
+        for state in states:
+            action_probs = self.model.predict_action(state)
+            actions.append(np.argmax(action_probs))
         
-    def predict(self, observation, deterministic=True):
-        """Предсказание действия"""
-        action, _states = self.model.predict(observation, deterministic=deterministic)
-        return action
+        actions = np.array(actions)
+        buy_count = np.sum(actions == 0)
+        hold_count = np.sum(actions == 1)
+        sell_count = np.sum(actions == 2)
+        
+        total = len(actions)
+        # 🔥 ИЗМЕНЕНО: logger.info -> print
+        print(f"Распределение действий: BUY: {buy_count/total:.2%}, HOLD: {hold_count/total:.2%}, SELL: {sell_count/total:.2%}")
+        
+        return {
+            'buy_count': int(buy_count),
+            'hold_count': int(hold_count),
+            'sell_count': int(sell_count),
+            'total': total
+        }
