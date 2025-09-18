@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import RobustScaler
 import pickle
 import os
 import talib # 🔥 ДОБАВЛЕНО: Импорт TA-Lib
@@ -89,7 +89,7 @@ class FeatureEngineering:
     """
     def __init__(self, sequence_length=60):
         self.sequence_length = sequence_length
-        self.scaler = StandardScaler()
+        self.scaler = RobustScaler()  # Более устойчив к выбросам чем StandardScaler
         # 🔥 ИЗМЕНЕНО: Исходные колонки для расчета индикаторов
         self.base_features = ['open', 'high', 'low', 'close', 'volume', 'turnover']
         self.feature_columns = list(self.base_features) # Будут обновлены после добавления индикаторов
@@ -161,8 +161,25 @@ class FeatureEngineering:
             
             # Обновляем список признаков
             self.feature_columns = self.base_features + [
-                'RSI', 'MACD', 'MACDSIGNAL', 'MACDHIST', 
-                'STOCH_K', 'STOCH_D', 'WILLR', 'AO'
+                # Трендовые индикаторы
+                'EMA_7', 'EMA_14', 'EMA_21',
+                'MACD', 'MACDSIGNAL', 'MACDHIST',
+                'KAMA', 'SUPERTREND',
+                
+                # Momentum индикаторы
+                'RSI', 'CMO', 'ROC',
+                
+                # Volume индикаторы
+                'OBV', 'MFI',
+                
+                # Volatility индикаторы
+                'ATR', 'NATR',
+                
+                # Statistical индикаторы
+                'STDDEV',
+                
+                # Cycle индикаторы
+                'HT_DCPERIOD', 'HT_SINE', 'HT_LEADSINE'
             ]
             
             # 🔥 ДОБАВЛЕНО: Кэшируем результат
@@ -187,7 +204,7 @@ class FeatureEngineering:
         return df
     
     def _calculate_all_indicators_batch(self, df):
-        """🔥 ДОБАВЛЕНО: Массовый расчет всех индикаторов"""
+        """🔥 ОБНОВЛЕНО: Массовый расчет всех новых индикаторов"""
         try:
             # Предварительно заполняем NaN значения в исходных данных
             for col in ['open', 'high', 'low', 'close', 'volume']:
@@ -195,17 +212,28 @@ class FeatureEngineering:
                     # Используем forward fill, затем backward fill для заполнения NaN
                     df[col] = df[col].ffill().bfill()
             
-            close_prices = df['close'].values
-            high_prices = df['high'].values
-            low_prices = df['low'].values
+            # Преобразуем в float64 для talib
+            close_prices = df['close'].astype(np.float64).values
+            high_prices = df['high'].astype(np.float64).values
+            low_prices = df['low'].astype(np.float64).values
+            volume_prices = df['volume'].astype(np.float64).values
+            
+            # Заменяем нулевые цены на минимальные положительные значения для предотвращения деления на ноль
+            close_prices = np.where(close_prices <= 0, 1e-8, close_prices)
+            high_prices = np.where(high_prices <= 0, 1e-8, high_prices)
+            low_prices = np.where(low_prices <= 0, 1e-8, low_prices)
+            volume_prices = np.where(volume_prices <= 0, 1e-8, volume_prices)
             
             # Массовый расчет всех индикаторов
             indicators = {}
             
-            # RSI
-            indicators['RSI'] = talib.RSI(close_prices, timeperiod=config.RSI_PERIOD)
+            # === ТРЕНДОВЫЕ ИНДИКАТОРЫ ===
             
-            # MACD
+            # EMA (7, 14, 21)
+            for period in config.EMA_PERIODS:
+                indicators[f'EMA_{period}'] = talib.EMA(close_prices, timeperiod=period)
+            
+            # MACD (сохраняется)
             macd, macdsignal, macdhist = talib.MACD(
                 close_prices,
                 fastperiod=config.MACD_FASTPERIOD,
@@ -216,24 +244,65 @@ class FeatureEngineering:
             indicators['MACDSIGNAL'] = macdsignal
             indicators['MACDHIST'] = macdhist
             
-            # Stochastic
-            stoch_k, stoch_d = talib.STOCH(
-                high_prices, low_prices, close_prices,
-                fastk_period=config.STOCH_K_PERIOD,
-                slowk_period=config.STOCH_K_PERIOD,
-                slowd_period=config.STOCH_D_PERIOD
+            # KAMA
+            indicators['KAMA'] = talib.KAMA(close_prices, timeperiod=config.KAMA_PERIOD)
+            
+            # SuperTrend (кастомная реализация)
+            indicators['SUPERTREND'] = self._calculate_supertrend(
+                high_prices, low_prices, close_prices, 
+                config.SUPERTREND_PERIOD, config.SUPERTREND_MULTIPLIER
             )
-            indicators['STOCH_K'] = stoch_k
-            indicators['STOCH_D'] = stoch_d
             
-            # Williams %R
-            indicators['WILLR'] = talib.WILLR(high_prices, low_prices, close_prices, timeperiod=config.WILLR_PERIOD)
+            # === MOMENTUM ИНДИКАТОРЫ ===
             
-            # Awesome Oscillator
-            median_price = (high_prices + low_prices) / 2
-            sma_5 = talib.SMA(median_price, timeperiod=config.AO_FASTPERIOD)
-            sma_34 = talib.SMA(median_price, timeperiod=config.AO_SLOWPERIOD)
-            indicators['AO'] = sma_5 - sma_34
+            # RSI (сохраняется)
+            indicators['RSI'] = talib.RSI(close_prices, timeperiod=config.RSI_PERIOD)
+            
+            # CMO
+            indicators['CMO'] = talib.CMO(close_prices, timeperiod=config.CMO_PERIOD)
+            
+            # ROC
+            indicators['ROC'] = talib.ROC(close_prices, timeperiod=config.ROC_PERIOD)
+            
+            # === VOLUME ИНДИКАТОРЫ ===
+            
+            # OBV
+            indicators['OBV'] = talib.OBV(close_prices, volume_prices)
+            
+            # MFI
+            indicators['MFI'] = talib.MFI(
+                high_prices, low_prices, close_prices, volume_prices, 
+                timeperiod=config.RSI_PERIOD
+            )
+            
+            # === VOLATILITY ИНДИКАТОРЫ ===
+            
+            # ATR
+            indicators['ATR'] = talib.ATR(
+                high_prices, low_prices, close_prices, 
+                timeperiod=config.ATR_PERIOD
+            )
+            
+            # NATR
+            indicators['NATR'] = talib.NATR(
+                high_prices, low_prices, close_prices, 
+                timeperiod=config.NATR_PERIOD
+            )
+            
+            # === STATISTICAL ИНДИКАТОРЫ ===
+            
+            # STDDEV
+            indicators['STDDEV'] = talib.STDDEV(close_prices, timeperiod=config.STDDEV_PERIOD)
+            
+            # === CYCLE ИНДИКАТОРЫ ===
+            
+            # HT_DCPERIOD
+            indicators['HT_DCPERIOD'] = talib.HT_DCPERIOD(close_prices)
+            
+            # HT_SINE
+            sine, leadsine = talib.HT_SINE(close_prices)
+            indicators['HT_SINE'] = sine
+            indicators['HT_LEADSINE'] = leadsine
             
             # Добавляем все индикаторы в DataFrame и заполняем NaN
             for name, values in indicators.items():
@@ -249,6 +318,55 @@ class FeatureEngineering:
             print(f"Ошибка при массовом расчете индикаторов: {e}")
             return False
     
+    def _calculate_supertrend(self, high, low, close, period=10, multiplier=3.0):
+        """Расчет SuperTrend индикатора"""
+        try:
+            # Расчет ATR
+            atr = talib.ATR(high, low, close, timeperiod=period)
+            
+            # Расчет базовых линий
+            hl2 = (high + low) / 2
+            upper_band = hl2 + (multiplier * atr)
+            lower_band = hl2 - (multiplier * atr)
+            
+            # Инициализация массивов
+            supertrend = np.zeros_like(close)
+            direction = np.ones_like(close)
+            
+            # Расчет SuperTrend
+            for i in range(1, len(close)):
+                # Обновление верхней полосы
+                if upper_band[i] < upper_band[i-1] or close[i-1] > upper_band[i-1]:
+                    upper_band[i] = upper_band[i]
+                else:
+                    upper_band[i] = upper_band[i-1]
+                
+                # Обновление нижней полосы
+                if lower_band[i] > lower_band[i-1] or close[i-1] < lower_band[i-1]:
+                    lower_band[i] = lower_band[i]
+                else:
+                    lower_band[i] = lower_band[i-1]
+                
+                # Определение направления тренда
+                if close[i] <= lower_band[i-1]:
+                    direction[i] = -1
+                elif close[i] >= upper_band[i-1]:
+                    direction[i] = 1
+                else:
+                    direction[i] = direction[i-1]
+                
+                # Расчет SuperTrend
+                if direction[i] == 1:
+                    supertrend[i] = lower_band[i]
+                else:
+                    supertrend[i] = upper_band[i]
+            
+            return supertrend
+            
+        except Exception as e:
+            print(f"Ошибка при расчете SuperTrend: {e}")
+            return np.zeros_like(close)
+
     def _create_fallback_indicators_df(self, df=None):
         """🔥 ИСПРАВЛЕНО: Создает DataFrame с fallback значениями без рекурсии"""
         self.fallback_retry_count += 1
@@ -271,18 +389,56 @@ class FeatureEngineering:
             })
         
         # Добавляем fallback индикаторы с медианными значениями
-        df['RSI'] = 50.0  # Нейтральный RSI
+        # Трендовые индикаторы
+        for period in config.EMA_PERIODS:
+            df[f'EMA_{period}'] = 100.0
         df['MACD'] = 0.0
         df['MACDSIGNAL'] = 0.0
         df['MACDHIST'] = 0.0
-        df['STOCH_K'] = 50.0
-        df['STOCH_D'] = 50.0
-        df['WILLR'] = -50.0
-        df['AO'] = 0.0
+        df['KAMA'] = 100.0
+        df['SUPERTREND'] = 100.0
+        
+        # Momentum индикаторы
+        df['RSI'] = 50.0
+        df['CMO'] = 0.0
+        df['ROC'] = 0.0
+        
+        # Volume индикаторы
+        df['OBV'] = 0.0
+        df['MFI'] = 50.0
+        
+        # Volatility индикаторы
+        df['ATR'] = 1.0
+        df['NATR'] = 1.0
+        
+        # Statistical индикаторы
+        df['STDDEV'] = 1.0
+        
+        # Cycle индикаторы
+        df['HT_DCPERIOD'] = 20.0
+        df['HT_SINE'] = 0.0
+        df['HT_LEADSINE'] = 0.0
         
         self.feature_columns = self.base_features + [
-            'RSI', 'MACD', 'MACDSIGNAL', 'MACDHIST', 
-            'STOCH_K', 'STOCH_D', 'WILLR', 'AO'
+            # Трендовые индикаторы
+            'EMA_7', 'EMA_14', 'EMA_21',
+            'MACD', 'MACDSIGNAL', 'MACDHIST',
+            'KAMA', 'SUPERTREND',
+            
+            # Momentum индикаторы
+            'RSI', 'CMO', 'ROC',
+            
+            # Volume индикаторы
+            'OBV', 'MFI',
+            
+            # Volatility индикаторы
+            'ATR', 'NATR',
+            
+            # Statistical индикаторы
+            'STDDEV',
+            
+            # Cycle индикаторы
+            'HT_DCPERIOD', 'HT_SINE', 'HT_LEADSINE'
         ]
         
         # Сбрасываем счетчик после успешного создания
@@ -389,7 +545,15 @@ class FeatureEngineering:
             
             for i in range(len(data) - self.sequence_length):
                 try:
-                    X.append(data[i:i+self.sequence_length])
+                    # Создаем последовательность
+                    sequence = data[i:i+self.sequence_length]
+                    
+                    # Проверяем на NaN/inf в последовательности
+                    if np.isnan(sequence).any() or np.isinf(sequence).any():
+                        print(f"Обнаружен NaN/inf в последовательности {i}, пропускаем")
+                        continue
+                    
+                    X.append(sequence)
                     y_close.append(data[i+self.sequence_length, close_index])
                 except (IndexError, ValueError) as e:
                     print(f"Ошибка при создании последовательности {i}: {e}")

@@ -1,224 +1,424 @@
-import os
-import sys
 import time
-# import logging # 🔥 УДАЛЕНО: Импорт logging
+import os
+import json
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
-import tensorflow as tf
 from pybit.unified_trading import HTTP
+import logging
+from functools import wraps
+import psutil
+import gc
 
-# Импорт наших модулей
-from feature_engineering import FeatureEngineering
-from models.xlstm_rl_model import XLSTMRLModel
-from hybrid_decision_maker import HybridDecisionMaker
-from trade_manager import TradeManager
-from rl_agent import RLAgent
+# === НОВЫЕ ИМПОРТЫ ===
 import config
+import feature_engineering
+import trade_manager
+import trade_logger
+from hybrid_decision_maker import HybridDecisionMaker
+from performance_monitor import PerformanceMonitor
+from notification_system import NotificationSystem
 
-# 🔥 УДАЛЕНО: Настройка логирования
-# logging.basicConfig(
-#     level=logging.INFO,
-#     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-#     handlers=[
-#         logging.StreamHandler(),
-#         logging.FileHandler('live_trading.log')
-#     ]
-# )
-# logger = logging.getLogger('live_trading')
+# === КОНСТАНТЫ ===
+TRADER_STATUS_FILE = 'trader_status.txt'
+ACTIVE_POSITIONS_FILE = 'active_positions.json'
+LIVE_DATA_FILE = 'live_data.json'
+HOTLIST_FILE = 'hotlist.txt'
+LOG_FILE = 'trade_log.csv'
+LOOP_SLEEP_SECONDS = 3
+OPEN_TRADE_LIMIT = 1000
+TAKE_PROFIT_PCT = 1.5  # Увеличили TP
+STOP_LOSS_PCT = -1.0   # Уменьшили SL
+CONFIDENCE_THRESHOLD = 0.65  # Повысили порог уверенности
+#SEQUENCE_LENGTH = 10
 
-def fetch_latest_data(session, symbol, timeframe, limit=100):
-    """Получает последние свечи с биржи"""
-    try:
-        response = session.get_kline(
-            category="linear",
-            symbol=symbol,
-            interval=timeframe,
-            limit=limit
-        )
-        
-        if response['retCode'] == 0:
-            data = response['result']['list']
-            
-            # Преобразуем данные в DataFrame
-            df = pd.DataFrame(data, columns=[
-                'timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'
-            ])
-            
-            # Преобразуем типы данных
-            numeric_columns = ['open', 'high', 'low', 'close', 'volume', 'turnover']
-            for col in numeric_columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-            
-            # НЕ преобразуем timestamp в datetime, оставляем как число
-            df['timestamp'] = pd.to_numeric(df['timestamp'])
-            df['symbol'] = symbol
-            
-            # Сортируем по времени
-            df.sort_values('timestamp', inplace=True)
-            
-            return df
-        else:
-            # 🔥 ИЗМЕНЕНО: logger.error -> print
-            print(f"Ошибка при получении данных: {response['retMsg']}")
+# 🔥 ОБНОВЛЕННЫЕ FEATURE_COLUMNS - НОВЫЕ ИНДИКАТОРЫ
+FEATURE_COLUMNS = [
+    'close',  # Базовая цена
+    
+    # Трендовые индикаторы
+    'EMA_7', 'EMA_14', 'EMA_21',
+    'MACD', 'MACDSIGNAL', 'MACDHIST',
+    'KAMA', 'SUPERTREND',
+    
+    # Momentum индикаторы
+    'RSI', 'CMO', 'ROC',
+    
+    # Volume индикаторы
+    'OBV', 'MFI',
+    
+    # Volatility индикаторы
+    'ATR', 'NATR',
+    
+    # Statistical индикаторы
+    'STDDEV',
+    
+    # Cycle индикаторы
+    'HT_DCPERIOD', 'HT_SINE', 'HT_LEADSINE'
+]
+
+opened_trades_counter = 0
+
+performance_monitor = None
+notification_system = None
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('trading_bot.log'),
+        logging.StreamHandler()
+    ]
+)
+
+def error_handler(func):
+    """Декоратор для обработки ошибок"""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            logging.error(f"Ошибка в {func.__name__}: {e}")
+            if 'notification_system' in globals():
+                notification_system.send_system_alert(f"Ошибка в {func.__name__}: {e}")
             return None
-    
-    except Exception as e:
-        # 🔥 ИЗМЕНЕНО: logger.error -> print
-        print(f"Ошибка при получении данных: {e}")
-        return None
+    return wrapper
 
-def main():
-    """Основная функция для запуска живой торговли"""
-    # 🔥 ИЗМЕНЕНО: logger.info -> print
-    print("🚀 ЗАПУСК СИСТЕМЫ ЖИВОЙ ТОРГОВЛИ С ТРЁХЭТАПНОЙ МОДЕЛЬЮ")
+@error_handler
+def manage_active_positions(session, decision_maker):
+    """Управление активными позициями с новой логикой"""
+    active_positions = load_active_positions()
+    if not active_positions:
+        return
+
+    print(f"Открыто сделок: {opened_trades_counter}/{OPEN_TRADE_LIMIT}. Активных позиций: {len(active_positions)}")
     
-    # Загружаем конфигурацию
-    api_key = config.BYBIT_API_KEY
-    api_secret = config.BYBIT_API_SECRET
-    api_url = config.API_URL
-    symbol = config.SYMBOLS[0]
-    timeframe = config.TIMEFRAME
-    order_amount = config.ORDER_USDT_AMOUNT
-    leverage = config.LEVERAGE
-    sequence_length = config.SEQUENCE_LENGTH
-    required_candles = config.REQUIRED_CANDLES
+    kline_cache = {}
+    symbols_to_remove = []
+    positions_items = list(active_positions.items())
+    displayed_positions = positions_items[:5]
+    remaining_count = len(positions_items) - 5 if len(positions_items) > 5 else 0
     
-    # Инициализация API
-    session = HTTP(
-        testnet=(api_url == "https://api-demo.bybit.com"),
-        api_key=api_key,
-        api_secret=api_secret
-    )
+    if remaining_count > 0:
+        print(f"  ... и еще {remaining_count} позиций (скрыто для чистоты логов)")
+
+    for i, (symbol, pos) in enumerate(positions_items):
+        try:
+            if symbol not in kline_cache:
+                kline_list = trade_manager.fetch_initial_data(session, symbol)
+                if not kline_list:
+                    continue
+                kline_cache[symbol] = pd.DataFrame(kline_list, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
+            
+            kline_df = kline_cache[symbol].copy()
+            
+            # === НОВАЯ ОБРАБОТКА С VSA ===
+            features_df = feature_engineering.calculate_features(kline_df.copy())
+            # features_df = feature_engineering.detect_candlestick_patterns(features_df) # 🔥 ЗАКОММЕНТИРОВАНО
+            # features_df = feature_engineering.calculate_vsa_features(features_df)  # <--- ЗАКОММЕНТИРОВАНО
+            
+            if features_df.empty or len(features_df) < config.SEQUENCE_LENGTH:
+                continue
+
+            # Принимаем решение через новую гибридную систему
+            decision = decision_maker.get_decision(features_df.tail(config.SEQUENCE_LENGTH), confidence_threshold=CONFIDENCE_THRESHOLD) # 🔥 ИЗМЕНЕНО: Используем config.SEQUENCE_LENGTH
+
+            latest_price = float(features_df.iloc[-1]['close'])
+            entry_price = float(pos['entry_price'])
+            
+            # Рассчитываем PnL
+            if pos['side'] == 'BUY':
+                pnl_pct = ((latest_price - entry_price) / entry_price) * 100
+            else:  # SELL
+                pnl_pct = ((entry_price - latest_price) / entry_price) * 100
+
+            # Показываем детали только для первых 5 позиций
+            if i < 5:
+                print(f"  - {symbol}: PnL {pnl_pct:.2f}% | Вход: {entry_price} | Сейчас: {latest_price} | Решение: {decision}")
+
+            # === УЛУЧШЕННАЯ ЛОГИКА ВЫХОДА С ДИНАМИЧЕСКИМИ СТОПАМИ ===
+            should_close = False
+            close_reason = ""
+            
+            # Вычисляем динамические стопы
+            dynamic_sl, dynamic_tp = calculate_dynamic_stops(features_df.iloc[-1], pos['side'], entry_price)
+            
+            print(f"  📊 Динамические уровни для {symbol}: TP={dynamic_tp:.2f}%, SL={dynamic_sl:.2f}%")
+            
+            # 1. Динамические стоп-лосс и тейк-профит
+            if pnl_pct >= dynamic_tp:
+                should_close = True
+                close_reason = f"DYNAMIC_TP ({pnl_pct:.2f}%)"
+            elif pnl_pct <= dynamic_sl:
+                should_close = True
+                close_reason = f"DYNAMIC_SL ({pnl_pct:.2f}%)"
+            
+            # 2. Сигнал модели на закрытие
+            elif (pos['side'] == 'BUY' and decision == 'SELL') or (pos['side'] == 'SELL' and decision == 'BUY'):
+                should_close = True
+                close_reason = f"MODEL_SIGNAL ({decision})"
+            
+            # 3. VSA сигнал на закрытие (отключен)
+            # elif should_close_by_vsa(features_df.iloc[-1], pos['side']): # <--- ЗАКОММЕНТИРОВАНО
+            #     should_close = True
+            #     close_reason = "VSA_SIGNAL"
+            
+            if should_close:
+                print(f"!!! {symbol}: {close_reason}. Закрываю позицию... !!!")
+                
+                close_result = trade_manager.close_market_position(session, symbol, pos['quantity'], pos['side'])
+                if close_result.get('status') == 'SUCCESS':
+                    # Логируем с объяснением решения
+                    trade_logger.log_enhanced_trade_with_quality_metrics(symbol, 'CLOSE', close_result, pos, pnl_pct,
+                                     decision_maker, features_df.iloc[-1], close_reason)
+                    notification_system.send_trade_alert(symbol, "CLOSE", close_result['price'], pnl_pct, reason=close_reason)
+                    performance_monitor.log_trade_closed(symbol, pnl_pct)
+                    symbols_to_remove.append(symbol)
+
+        except Exception as e:
+            print(f"Ошибка при управлении позицией {symbol}: {e}")
+
+    # Удаляем закрытые позиции
+    if symbols_to_remove:
+        current_positions = load_active_positions()
+        for symbol in symbols_to_remove:
+            if symbol in current_positions: 
+                del current_positions[symbol]
+        save_active_positions(current_positions)
+
+
+@error_handler
+def process_new_signal(session, symbol, decision_maker):
+    """Обработка новых сигналов с VSA анализом"""
+    global opened_trades_counter
     
-    # Инициализация компонентов системы
-    feature_engineering = FeatureEngineering(sequence_length=sequence_length)
-    
-    # Загружаем скейлер
-    if not feature_engineering.load_scaler():
-        # 🔥 ИЗМЕНЕНО: logger.error -> print
-        print("❌ Не удалось загрузить скейлер. Убедитесь, что трёхэтапное обучение завершено.")
+    if opened_trades_counter >= OPEN_TRADE_LIMIT: 
         return
     
-    # Инициализация модели
-    input_shape = (sequence_length, len(feature_engineering.feature_columns))
-    rl_model = XLSTMRLModel(input_shape=input_shape, 
-                          memory_size=config.XLSTM_MEMORY_SIZE, 
-                          memory_units=config.XLSTM_MEMORY_UNITS)
-    
-    # Загружаем финальную обученную модель
-    try:
-        rl_model.load(stage="_rl_finetuned")
-        # 🔥 ИЗМЕНЕНО: logger.info -> print
-        print("✅ Финальная трёхэтапная модель успешно загружена")
-    except Exception as e:
-        # 🔥 ИЗМЕНЕНО: logger.error -> print
-        print(f"❌ Не удалось загрузить финальную модель: {e}")
-        # 🔥 ИЗМЕНЕНО: logger.info -> print
-        print("Попытка загрузки supervised модели...")
-        try:
-            rl_model.load(stage="_supervised")
-            # 🔥 ИЗМЕНЕНО: logger.info -> print
-            print("✅ Supervised модель загружена как fallback")
-        except Exception as e2:
-            # 🔥 ИЗМЕНЕНО: logger.error -> print
-            print(f"❌ Не удалось загрузить никакую модель: {e2}")
-            return
-    
-    # Инициализация RL-агента
-    rl_agent = RLAgent(state_shape=input_shape, 
-                      memory_size=config.XLSTM_MEMORY_SIZE, 
-                      memory_units=config.XLSTM_MEMORY_UNITS)
-    rl_agent.model = rl_model
-    
-    # Инициализация механизма принятия решений
-    decision_maker = HybridDecisionMaker(rl_agent)
-    
-    # Инициализация менеджера торговли
-    trade_manager = TradeManager(
-        api_key=api_key,
-        api_secret=api_secret,
-        api_url=api_url,
-        order_amount=order_amount,
-        symbol=symbol,
-        leverage=leverage
-    )
-    
-    # 🔥 ИЗМЕНЕНО: logger.info -> print
-    print("✅ Система инициализирована, начинаем торговлю...")
-    
-    # Основной цикл торговли
-    while True:
-        try:
-            # Получаем текущее время
-            current_time = datetime.now()
-            
-            # Получаем последние данные
-            df = fetch_latest_data(session, symbol, timeframe, limit=required_candles)
-            
-            if df is None or len(df) < sequence_length:
-                # 🔥 ИЗМЕНЕНО: logger.error -> print
-                print(f"❌ Недостаточно данных для анализа. Получено: {len(df) if df is not None else 0} строк")
-                time.sleep(10)
-                continue
-            
-            # Подготавливаем данные
-            X, _, _ = feature_engineering.prepare_test_data(df)
-            
-            if len(X) == 0:
-                # 🔥 ИЗМЕНЕНО: logger.error -> print
-                print("❌ Не удалось подготовить данные для анализа")
-                time.sleep(10)
-                continue
-            
-            # Получаем последнее состояние рынка
-            current_state = X[-1]
-            
-            # Принимаем решение (передаем текущую позицию трейд-менеджера)
-            action, confidence = decision_maker.make_decision(
-                current_state,
-                position=trade_manager.position
-            )
-            
-            # Логируем решение
-            action_names = {0: "BUY", 1: "HOLD", 2: "SELL"}
-            # 🔥 ИЗМЕНЕНО: logger.info -> print
-            print(f"📊 Решение: {action_names[action]} (уверенность: {confidence:.4f})")
-            
-            # Получаем объяснение решения
-            explanation = decision_maker.explain_decision(current_state)
-            # 🔥 ИЗМЕНЕНО: logger.info -> print
-            print(f"🧠 Анализ: BUY={explanation['all_probs']['BUY']:.3f}, "
-                       f"HOLD={explanation['all_probs']['HOLD']:.3f}, "
-                       f"SELL={explanation['all_probs']['SELL']:.3f}, "
-                       f"Value={explanation['state_value']:.4f}")
-            
-            # Выполняем действие
-            if trade_manager.place_order(action):
-                # 🔥 ИЗМЕНЕНО: logger.info -> print
-                print(f"✅ Ордер размещен: {action_names[action]}")
-            else:
-                # 🔥 ИЗМЕНЕНО: logger.error -> print
-                print(f"❌ Не удалось разместить ордер: {action_names[action]}")
-            
-            # Получаем информацию о позиции
-            position_info = trade_manager.get_position_info()
-            if position_info and position_info['size'] > 0:
-                # 🔥 ИЗМЕНЕНО: logger.info -> print
-                print(f"💰 Позиция: {position_info['side']} {position_info['size']}, "
-                           f"PnL: {position_info['unrealised_pnl']}")
-            
-            # Ждем перед следующей итерацией
-            time.sleep(30)
-            
-        except KeyboardInterrupt:
-            # 🔥 ИЗМЕНЕНО: logger.info -> print
-            print("⏹️ Торговля остановлена пользователем")
-            break
-        except Exception as e:
-            # 🔥 ИЗМЕНЕНО: logger.error -> print
-            print(f"❌ Ошибка в процессе торговли: {e}")
-            time.sleep(10)
+    active_positions = load_active_positions()
+    if symbol in active_positions: 
+        return
 
-if __name__ == "__main__":
-    main()
+    print(f"--- Обработка нового сигнала для {symbol} (с VSA анализом) ---")
+    
+    try:
+        with open(LIVE_DATA_FILE, 'r') as f: 
+            live_data = json.load(f)
+        
+        symbol_data = live_data.get(symbol)
+        if not symbol_data: 
+            return
+
+        kline_list = symbol_data.get('klines')
+        if not kline_list or len(kline_list) < config.REQUIRED_CANDLES: 
+            return
+
+        # Подготавливаем данные с VSA
+        kline_df = pd.DataFrame(kline_list, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
+        
+        # === ПОЛНАЯ ОБРАБОТКА С VSA ===
+        features_df = feature_engineering.calculate_features(kline_df.copy())
+        # features_df = feature_engineering.detect_candlestick_patterns(features_df) # 🔥 ЗАКОММЕНТИРОВАНО
+        # features_df = feature_engineering.calculate_vsa_features(features_df) # <--- ЗАКОММЕНТИРОВАНО
+        
+        if features_df.empty or len(features_df) < config.SEQUENCE_LENGTH:
+            return
+
+        # Принимаем решение через гибридную систему
+        decision = decision_maker.get_decision(features_df.tail(config.SEQUENCE_LENGTH), confidence_threshold=CONFIDENCE_THRESHOLD) # 🔥 ИЗМЕНЕНО: Используем config.SEQUENCE_LENGTH
+        
+        print(f"--- {symbol} | Гибридное решение: {decision} ---")
+        
+        # Показываем объяснение решения
+        if hasattr(decision_maker, 'get_decision_explanation'):
+            explanation = decision_maker.get_decision_explanation()
+            print(explanation)
+
+        if decision in ['BUY', 'SELL']:
+            # НОВЫЙ КОД - Открытие сделки без VSA подтверждения
+    # Дополнительная проверка VSA подтверждения (отключена)
+    # if validate_decision_with_vsa(features_df.iloc[-1], decision): # <--- ЗАКОММЕНТИРОВАНО
+            open_result = trade_manager.open_market_position(session, decision, symbol)
+    
+            if open_result.get('status') == 'SUCCESS':
+                performance_monitor.log_trade_opened(symbol, decision, vsa_confirmed=False) # ИЗМЕНЕНО: vsa_confirmed=False
+        # Логируем с полной информацией
+                notification_system.send_trade_alert(symbol, "OPEN", open_result['price'], reason=f"MODEL_DECISION_{decision}") # ИЗМЕНЕНО: Причина
+                trade_logger.log_enhanced_trade_with_quality_metrics(symbol, 'OPEN', open_result, None, 0,
+                                 decision_maker, features_df.iloc[-1], f"MODEL_DECISION_{decision}") # ИЗМЕНЕНО: Причина
+        
+        # Сохраняем позицию
+                active_positions = load_active_positions()
+                active_positions[symbol] = {
+                    'side': decision,
+                    'entry_price': open_result['price'],
+                    'quantity': open_result['quantity'],
+                    'timestamp': time.time(),
+                    'duration': 0,
+            # 'vsa_entry_strength': features_df.iloc[-1]['vsa_strength']  # <--- УДАЛЕНО: VSA сила входа
+                }
+                save_active_positions(active_positions)
+        
+                opened_trades_counter += 1
+                print(f"✅ Сделка #{opened_trades_counter}/{OPEN_TRADE_LIMIT} открыта на основе решения модели.") # ИЗМЕНЕНО: Сообщение
+        
+                if opened_trades_counter >= OPEN_TRADE_LIMIT:
+                    print("!!! ДОСТИГНУТ ЛИМИТ ОТКРЫТЫХ СДЕЛОК !!!")
+                    set_trader_status('MANAGING_ONLY')
+    # else: # <--- УДАЛЕНО: Блок else для VSA подтверждения
+    #     print(f"❌ VSA не подтверждает решение {decision} для {symbol}")
+
+    except Exception as e:
+        print(f"!!! КРИТИЧЕСКАЯ ОШИБКА при обработке сигнала для {symbol}: {e} !!!")
+
+
+
+def run_trading_loop():
+    """Главный торговый цикл с новой архитектурой"""
+    global performance_monitor, notification_system
+    print("=== ЗАПУСК НОВОГО ТРЕЙДИНГ-БОТА: xLSTM + VSA + RL ===")
+    
+    performance_monitor = PerformanceMonitor()
+    notification_system = NotificationSystem()
+
+    # Очистка файла с активными позициями при старте
+    if os.path.exists(ACTIVE_POSITIONS_FILE):
+        os.remove(ACTIVE_POSITIONS_FILE)
+        print(f"Файл {ACTIVE_POSITIONS_FILE} очищен для новой сессии.")
+
+    # Подключение к бирже
+    session = HTTP(testnet=True, api_key=config.BYBIT_API_KEY, api_secret=config.BYBIT_API_SECRET)
+    session.endpoint = config.API_URL
+    
+    # === ИНИЦИАЛИЗАЦИЯ НОВОЙ ГИБРИДНОЙ СИСТЕМЫ ===
+    try:
+        decision_maker = HybridDecisionMaker(
+            xlstm_model_path='models/xlstm_rl_model.keras',
+            rl_agent_path='models/rl_agent_BTCUSDT',  # Используем лучшего агента
+            feature_columns=FEATURE_COLUMNS,
+            sequence_length=config.SEQUENCE_LENGTH
+        )
+        print("✅ Гибридная система xLSTM + VSA + RL успешно загружена!")
+        
+        try:
+            decision_maker.regime_detector.load_detector('models/market_regime_detector.pkl')
+            print("✅ Детектор режимов загружен")
+        except:
+            print("⚠️ Детектор режимов не найден, будет обучен заново")
+        
+    except Exception as e:
+        print(f"❌ КРИТИЧЕСКАЯ ОШИБКА: Не удалось загрузить гибридную систему: {e}")
+        print("Убедитесь, что модели обучены и файлы существуют:")
+        print("- models/xlstm_rl_model.keras")
+        print("- models/xlstm_rl_scaler.pkl")
+        print("- models/rl_agent_BTCUSDT.zip")
+        return
+
+    # Главный торговый цикл
+    loop_counter = 0
+    while True:
+        status = get_trader_status()
+        if status == 'STOP':
+            print("Трейдер остановлен. Выход.")
+            break
+        
+        try:
+            # Управление активными позициями
+            manage_active_positions(session, decision_maker)
+            
+            # Обработка новых сигналов
+            if get_trader_status() == 'BUSY':
+                print("Получен сигнал 'BUSY'.")
+                with open(HOTLIST_FILE, 'r') as f: 
+                    symbol = f.read().strip()
+                
+                if symbol: 
+                    process_new_signal(session, symbol, decision_maker)
+                
+                if opened_trades_counter < OPEN_TRADE_LIMIT:
+                    set_trader_status('DONE')
+                else:
+                    set_trader_status('MANAGING_ONLY')
+            
+            # Каждые 10 циклов показываем статистику
+            loop_counter += 1
+            if loop_counter % 10 == 0:
+                print(f"\n=== СТАТИСТИКА (Цикл {loop_counter}) ===")
+                print(f"Открыто сделок: {opened_trades_counter}/{OPEN_TRADE_LIMIT}")
+                print(f"Активных позиций: {len(load_active_positions())}")
+                print(f"Статус: {get_trader_status()}")
+                
+                # Показываем последнее объяснение решения
+                if hasattr(decision_maker, 'get_decision_explanation'):
+                    explanation = decision_maker.get_decision_explanation()
+                    print(f"Последнее решение:\n{explanation}")
+
+        except Exception as e:
+            print(f"Произошла ошибка в главном цикле: {e}")
+            import traceback
+            traceback.print_exc()
+
+        if loop_counter % 100 == 0:
+            system_stats = monitor_system_resources()
+            if system_stats['memory'] > 85:
+                notification_system.send_system_alert(f"Критическое использование памяти: {system_stats['memory']:.1f}%")
+        time.sleep(LOOP_SLEEP_SECONDS)
+
+# === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (остаются без изменений) ===
+def get_trader_status():
+    try:
+        with open(TRADER_STATUS_FILE, 'r') as f: 
+            return f.read().strip()
+    except FileNotFoundError: 
+        return 'DONE'
+
+def set_trader_status(status):
+    with open(TRADER_STATUS_FILE, 'w') as f: 
+        f.write(status)
+
+def load_active_positions():
+    if not os.path.exists(ACTIVE_POSITIONS_FILE): 
+        return {}
+    try:
+        with open(ACTIVE_POSITIONS_FILE, 'r') as f: 
+            return json.load(f)
+    except (json.JSONDecodeError, FileNotFoundError): 
+        return {}
+
+def save_active_positions(positions):
+    with open(ACTIVE_POSITIONS_FILE, 'w') as f: 
+        json.dump(positions, f, indent=4)
+
+def monitor_system_resources():
+    """Мониторинг системных ресурсов"""
+    memory_percent = psutil.virtual_memory().percent
+    cpu_percent = psutil.cpu_percent()
+    
+    if memory_percent > 80:
+        print(f"⚠️ Высокое использование памяти: {memory_percent:.1f}%")
+        gc.collect()  # Принудительная сборка мусора
+        
+    if cpu_percent > 90:
+        print(f"⚠️ Высокая загрузка CPU: {cpu_percent:.1f}%")
+        
+    return {'memory': memory_percent, 'cpu': cpu_percent}
+
+if __name__ == '__main__':
+    run_trading_loop()
+
+def calculate_dynamic_stops(features_row, position_side, entry_price):
+    """
+    Вычисляет фиксированные стоп-лоссы, так как индикаторы отключены.
+    """
+    base_sl = -0.5 # 🔥 ИЗМЕНЕНО: Фиксированный Stop Loss (например, -0.5%)
+    base_tp = 1.0  # 🔥 ИЗМЕНЕНО: Фиксированный Take Profit (например, 1.0%)
+    
+    # При отключенных индикаторах используем базовые фиксированные значения
+    dynamic_sl = base_sl
+    dynamic_tp = base_tp
+        
+    # Ограничиваем максимальные и минимальные значения
+    dynamic_sl = max(dynamic_sl, -3.0)
+    dynamic_tp = min(dynamic_tp, 3.0)
+
+    return dynamic_sl, dynamic_tp

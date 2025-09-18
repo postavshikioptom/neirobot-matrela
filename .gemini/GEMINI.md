@@ -114,14 +114,12 @@ Websocket: wss://stream-testnet.bybit.com
 
 # Индикаторы для обучения
 
-RSI (Relative Strength Index)
-MACD (Moving Average Convergence Divergence)
-Стохастик
-Williams %R (WILLR_14)
-AO (Awesome Oscillator)
-
-ADX (Average Directional Index)
-
+- Тренд: EMA(7,14,21), MACD(12,26,9), KAMA, SuperTrend
+- Momentum: RSI, CMO(14), ROC(5)
+- Volume: OBV, MFI
+- Volatility: ATR, NATR
+- Statistical: STDDEV
+- Cycle: HT_DCPERIOD, HT_SINE
 
 
 # Паттерны 
