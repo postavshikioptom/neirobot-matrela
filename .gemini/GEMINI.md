@@ -88,7 +88,7 @@ python test_patterns.py - проверка паттернов на работо�
 
 
 ## КОМАНДЫ НА LINUX СЕРВЕРЕ
-Установка venv: python3 -m venv venv
+Установка venv: python3 -m venv venv    | для Debian  apt install python3-dev python3-pip python3-venv (а потом python3 -m venv venv) или  apt install python3.10.4-venv или
 source venv/bin/activate
 Установить любой первый пакет в чистую venv например pybit. Потом посмотреть путь к пакетам и туда перенести все
 
@@ -116,9 +116,12 @@ Websocket: wss://stream-testnet.bybit.com
 
 RSI (Relative Strength Index)
 MACD (Moving Average Convergence Divergence)
+Стохастик
+Williams %R (WILLR_14)
+AO (Awesome Oscillator)
 
 ADX (Average Directional Index)
-Стохастик
+
 
 
 # Паттерны 
@@ -139,6 +142,7 @@ ATR_14 - все время отрицательный и BUY и SELL
 ## Добавил индикаторы
 RSI (Relative Strength Index)
 MACD (Moving Average Convergence Divergence)
+Стохастик
 Williams %R (WILLR_14)
 AO (Awesome Oscillator)
 

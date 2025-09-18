@@ -50,7 +50,8 @@ def fetch_latest_data(session, symbol, timeframe, limit=100):
             for col in numeric_columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
             
-            df['timestamp'] = pd.to_datetime(pd.to_numeric(df['timestamp']), unit='ms')
+            # НЕ преобразуем timestamp в datetime, оставляем как число
+            df['timestamp'] = pd.to_numeric(df['timestamp'])
             df['symbol'] = symbol
             
             # Сортируем по времени

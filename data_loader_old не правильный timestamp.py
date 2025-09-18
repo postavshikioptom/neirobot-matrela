@@ -1,5 +1,4 @@
 import pandas as pd
-import numpy as np
 from pybit.unified_trading import HTTP
 import time
 import math
@@ -11,8 +10,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # --- Конфигурация ---
-TARGET_TOTAL_ROWS = 300000
-SYMBOLS_TO_LOAD = 300  # Количество монет для загрузки (уменьшил до 300 из 457)
+TARGET_TOTAL_ROWS = 500000
+SYMBOLS_TO_LOAD = 500  # Количество символов для загрузки
 KLINE_LIMIT_PER_REQUEST = 100  # Увеличено до максимума Bybit
 OUTPUT_FILENAME = 'historical_data.csv'
 REQUEST_DELAY = 0.2  # Уменьшена задержка
@@ -95,12 +94,8 @@ def get_historical_data_for_symbol(symbol: str, total_rows_needed: int) -> pd.Da
     for col in numeric_columns:
         df[col] = pd.to_numeric(df[col], errors='coerce')
     
-    # НЕ преобразуем timestamp в datetime, оставляем как число (миллисекунды)
-    df['timestamp'] = pd.to_numeric(df['timestamp'])
+    df['timestamp'] = pd.to_datetime(pd.to_numeric(df['timestamp']), unit='ms')
     df['symbol'] = symbol
-    
-    # Добавляем лог для проверки типа timestamp
-    logger.info(f"Тип timestamp для {symbol}: {df['timestamp'].dtype}")
     
     # Удаляем дубликаты и сортируем
     df.drop_duplicates(subset=['timestamp'], inplace=True)
@@ -124,11 +119,6 @@ def save_data_incrementally(data_frames: List[pd.DataFrame], filename: str) -> N
     master_df.drop_duplicates(subset=['timestamp', 'symbol'], inplace=True)
     master_df.sort_values(['symbol', 'timestamp'], inplace=True)
     master_df.reset_index(drop=True, inplace=True)
-    
-    # Убедимся, что timestamp в числовом формате
-    if pd.api.types.is_datetime64_dtype(master_df['timestamp']):
-        logger.info("Преобразуем timestamp из datetime обратно в миллисекунды")
-        master_df['timestamp'] = master_df['timestamp'].astype(np.int64) // 10**6
     
     # Сохраняем
     master_df.to_csv(filename, index=False)
