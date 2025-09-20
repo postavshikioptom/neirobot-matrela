@@ -75,7 +75,7 @@ python train_model.py --model xlstm_indicator - обучение только о
 
 
 СИМУЛЯЦИИ (торговля по подной монете за раз, типа нам ее передал Скринер, можно любую монету выбрать)
-simulation_engine_advanced.py
+python simulation_engine_advanced.py
 python run_simulation.py --symbol ALGOUSDT --mode LSTM_only
 python visual_graph.py --data historical_data.csv --symbol ADAUSDT 
 
@@ -120,6 +120,7 @@ Websocket: wss://stream-testnet.bybit.com
 - Volatility: ATR, NATR
 - Statistical: STDDEV
 - Cycle: HT_DCPERIOD, HT_SINE
+----- еще добавил по совету Claude: Bollinger Bands (5 новых фич), Stochastic RSI, Williams %R, CCI, ADX - Всего +10 новых технических индикаторов
 
 
 # Паттерны 

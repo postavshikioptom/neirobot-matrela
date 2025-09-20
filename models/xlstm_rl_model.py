@@ -14,6 +14,68 @@ except ImportError as e:
     raise ImportError("XLSTMMemoryCell не найден")
 
 
+class FocalLoss(tf.keras.losses.Loss):
+    """
+    Focal Loss для борьбы с дисбалансом классов
+    Автоматически адаптируется к любому распределению классов
+    """
+    def __init__(self, alpha=0.25, gamma=2.0, label_smoothing=0.1, **kwargs):
+        super().__init__(**kwargs)
+        self.alpha = alpha
+        self.gamma = gamma
+        self.label_smoothing = label_smoothing
+    
+    def call(self, y_true, y_pred):
+        # Label smoothing для регуляризации
+        num_classes = tf.cast(tf.shape(y_pred)[-1], tf.float32)
+        y_true_smooth = y_true * (1.0 - self.label_smoothing) + self.label_smoothing / num_classes
+        
+        # Вычисляем cross-entropy loss
+        ce_loss = tf.keras.losses.sparse_categorical_crossentropy(y_true, y_pred, from_logits=False)
+        
+        # Вычисляем p_t (вероятность правильного класса)
+        p_t = tf.exp(-ce_loss)
+        
+        # Focal Loss формула: FL(p_t) = -α_t * (1 - p_t)^γ * log(p_t)
+        focal_loss = self.alpha * tf.pow(1 - p_t, self.gamma) * ce_loss
+        
+        return focal_loss
+    
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'alpha': self.alpha,
+            'gamma': self.gamma,
+            'label_smoothing': self.label_smoothing
+        })
+        return config
+
+
+class WarmUpCosineDecayScheduler(tf.keras.callbacks.Callback):
+    """
+    Learning Rate Scheduler с WarmUp и Cosine Decay
+    Улучшает стабильность обучения и конвергенцию
+    """
+    def __init__(self, warmup_epochs=5, total_epochs=50, base_lr=0.001, min_lr=1e-6):
+        super().__init__()
+        self.warmup_epochs = warmup_epochs
+        self.total_epochs = total_epochs
+        self.base_lr = base_lr
+        self.min_lr = min_lr
+        
+    def on_epoch_begin(self, epoch, logs=None):
+        if epoch < self.warmup_epochs:
+            # WarmUp phase: линейное увеличение LR
+            lr = self.base_lr * (epoch + 1) / self.warmup_epochs
+        else:
+            # Cosine Decay phase
+            progress = (epoch - self.warmup_epochs) / (self.total_epochs - self.warmup_epochs)
+            lr = self.min_lr + (self.base_lr - self.min_lr) * 0.5 * (1 + np.cos(np.pi * progress))
+        
+        self.model.optimizer.learning_rate.assign(lr)
+        print(f"Epoch {epoch + 1}: Установлена скорость обучения: {lr:.6f}")
+
+
 
 
 
@@ -49,39 +111,48 @@ class XLSTMRLModel:
             if len(physical_devices) > 0:
                 # Для GPU используем более агрессивные настройки
                 self.supervised_optimizer = tf.keras.optimizers.Adam(
-                    learning_rate=0.001,
                     clipnorm=self.gradient_clip_norm
                 )
+                self.supervised_optimizer.learning_rate = tf.Variable(0.001)
                 self.actor_optimizer = tf.keras.optimizers.Adam(
-                    learning_rate=0.0005,
                     clipnorm=self.gradient_clip_norm
                 )
+                self.actor_optimizer.learning_rate = tf.Variable(0.0005)
                 self.critic_optimizer = tf.keras.optimizers.Adam(
-                    learning_rate=0.001,
                     clipnorm=self.gradient_clip_norm
                 )
+                self.critic_optimizer.learning_rate = tf.Variable(0.001)
                 print("Настроены оптимизаторы для GPU")
             else:
                 # Для CPU используем более консервативные настройки
                 self.supervised_optimizer = tf.keras.optimizers.Adam(
-                    learning_rate=0.0005,
                     clipnorm=self.gradient_clip_norm
                 )
+                self.supervised_optimizer.learning_rate = tf.Variable(0.0005)
                 self.actor_optimizer = tf.keras.optimizers.Adam(
-                    learning_rate=0.0001,
                     clipnorm=self.gradient_clip_norm
                 )
+                self.actor_optimizer.learning_rate = tf.Variable(0.0001)
                 self.critic_optimizer = tf.keras.optimizers.Adam(
-                    learning_rate=0.0005,
                     clipnorm=self.gradient_clip_norm
                 )
+                self.critic_optimizer.learning_rate = tf.Variable(0.0005)
                 print("Настроены оптимизаторы для CPU")
         except Exception as e:
             print(f"Ошибка при настройке оптимизаторов: {e}")
             # Fallback на стандартные настройки
-            self.supervised_optimizer = tf.keras.optimizers.Adam(clipnorm=self.gradient_clip_norm)
-            self.actor_optimizer = tf.keras.optimizers.Adam(clipnorm=self.gradient_clip_norm)
-            self.critic_optimizer = tf.keras.optimizers.Adam(clipnorm=self.gradient_clip_norm)
+            self.supervised_optimizer = tf.keras.optimizers.Adam(
+                clipnorm=self.gradient_clip_norm
+            )
+            self.supervised_optimizer.learning_rate = tf.Variable(0.001)
+            self.actor_optimizer = tf.keras.optimizers.Adam(
+                clipnorm=self.gradient_clip_norm
+            )
+            self.actor_optimizer.learning_rate = tf.Variable(0.001)
+            self.critic_optimizer = tf.keras.optimizers.Adam(
+                clipnorm=self.gradient_clip_norm
+            )
+            self.critic_optimizer.learning_rate = tf.Variable(0.001)
 
     def _build_actor_model(self):
         """Создает модель актора с ограничениями размера"""
@@ -233,27 +304,71 @@ class XLSTMRLModel:
         return model
 
     def compile_for_supervised_learning(self):
-        """Компилирует модель для этапа 1: Supervised Learning"""
-        # Убираем precision/recall из compile — будем считать их отдельно
+        """Компилирует модель для этапа 1: Supervised Learning с Focal Loss"""
+        # Создаем Focal Loss для борьбы с дисбалансом классов
+        focal_loss = FocalLoss(alpha=0.25, gamma=2.0, label_smoothing=0.1)
+        
         self.actor_model.compile(
             optimizer=self.supervised_optimizer,
-            loss='sparse_categorical_crossentropy',
+            loss=focal_loss,  # Заменили на Focal Loss
             metrics=['accuracy'],
-            run_eagerly=False  # оставляем False по умолчанию, можно временно ставить True для отладки
+            run_eagerly=False
         )
-        print("✅ Модель скомпилирована для supervised learning (без встроенных precision/recall)")
+        print("✅ Модель скомпилирована для supervised learning с Focal Loss (α=0.25, γ=2.0)")
 
     def compile_for_reward_modeling(self):
         """Компилирует модель для этапа 2: Reward Model Training"""
+        optimizer = tf.keras.optimizers.Adam(
+            clipnorm=self.gradient_clip_norm  # 🔥 ДОБАВЛЕНО: Gradient clipping
+        )
+        optimizer.learning_rate = tf.Variable(0.001)
         self.critic_model.compile(
-            optimizer=tf.keras.optimizers.Adam(
-                learning_rate=0.001,
-                clipnorm=self.gradient_clip_norm  # 🔥 ДОБАВЛЕНО: Gradient clipping
-            ),
+            optimizer=optimizer,
             loss='mse',
             metrics=['mae']
         )
         print("✅ Модель скомпилирована для reward modeling")
+
+    def get_training_callbacks(self, total_epochs=50, patience=10):
+        """
+        Возвращает улучшенные callbacks для обучения
+        """
+        callbacks = [
+            # WarmUp + Cosine Decay Learning Rate
+            WarmUpCosineDecayScheduler(
+                warmup_epochs=5,
+                total_epochs=total_epochs,
+                base_lr=0.001,
+                min_lr=1e-6
+            ),
+            
+            # Early Stopping для предотвращения переобучения
+            tf.keras.callbacks.EarlyStopping(
+                monitor='val_loss',
+                patience=patience,
+                restore_best_weights=True,
+                verbose=1
+            ),
+            
+            # Model Checkpoint для сохранения лучшей модели
+            tf.keras.callbacks.ModelCheckpoint(
+                filepath='models/best_xlstm_model.keras',
+                monitor='val_loss',
+                save_best_only=True,
+                verbose=1
+            ),
+            
+            # Reduce LR on Plateau (дополнительная защита)
+            tf.keras.callbacks.ReduceLROnPlateau(
+                monitor='val_loss',
+                factor=0.5,
+                patience=5,
+                min_lr=1e-7,
+                verbose=1
+            )
+        ]
+        
+        return callbacks
 
     def save(self, path='models', stage=""):
         """Сохраняет модель с указанием этапа"""

@@ -385,32 +385,14 @@ class ThreeStageTrainer:
         
         self.model.compile_for_supervised_learning()
         
-        callbacks = [
-            tf.keras.callbacks.EarlyStopping(
-                patience=15,
-                restore_best_weights=True, 
-                monitor='val_accuracy',
-                min_delta=0.001
-            ),
-            tf.keras.callbacks.ReduceLROnPlateau(
-                factor=0.3,
-                patience=7,
-                monitor='val_loss',
-                min_lr=1e-7
-            ),
-            tf.keras.callbacks.ModelCheckpoint(
-                'models/best_supervised_model.keras', 
-                save_best_only=True, 
-                monitor='val_loss'
-            ),
-            # 🔥 ЗАМЕНЕНО: вместо CosineRestartScheduler
-            CosineDecayCallback(
-                initial_learning_rate=0.001,
-                decay_steps=config.SUPERVISED_EPOCHS,
-                alpha=1e-6
-            ),
-            ValidationMetricsCallback(self.X_val_supervised, self.y_val_supervised)
-        ]
+        # Используем улучшенные callbacks из модели
+        callbacks = self.model.get_training_callbacks(
+            total_epochs=config.SUPERVISED_EPOCHS,
+            patience=10
+        )
+        
+        # Добавляем кастомный callback для детальных метрик
+        callbacks.append(ValidationMetricsCallback(self.X_val_supervised, self.y_val_supervised))
         
         print(f"Начинаем supervised обучение на {config.SUPERVISED_EPOCHS} эпох...")
         

@@ -304,6 +304,57 @@ class FeatureEngineering:
             indicators['HT_SINE'] = sine
             indicators['HT_LEADSINE'] = leadsine
             
+            # === НОВЫЕ ИНДИКАТОРЫ ДЛЯ УЛУЧШЕНИЯ БАЛАНСА КЛАССОВ ===
+            
+            # Bollinger Bands
+            bb_upper, bb_middle, bb_lower = talib.BBANDS(
+                close_prices, 
+                timeperiod=20, 
+                nbdevup=2, 
+                nbdevdn=2, 
+                matype=0
+            )
+            indicators['BB_UPPER'] = bb_upper
+            indicators['BB_MIDDLE'] = bb_middle
+            indicators['BB_LOWER'] = bb_lower
+            indicators['BB_WIDTH'] = (bb_upper - bb_lower) / bb_middle  # Ширина полос
+            indicators['BB_POSITION'] = (close_prices - bb_lower) / (bb_upper - bb_lower)  # Позиция цены в полосах
+            
+            # Stochastic RSI
+            fastk, fastd = talib.STOCHRSI(
+                close_prices, 
+                timeperiod=14, 
+                fastk_period=5, 
+                fastd_period=3, 
+                fastd_matype=0
+            )
+            indicators['STOCHRSI_K'] = fastk
+            indicators['STOCHRSI_D'] = fastd
+            
+            # Williams %R
+            indicators['WILLR'] = talib.WILLR(
+                high_prices, 
+                low_prices, 
+                close_prices, 
+                timeperiod=14
+            )
+            
+            # Commodity Channel Index (CCI)
+            indicators['CCI'] = talib.CCI(
+                high_prices, 
+                low_prices, 
+                close_prices, 
+                timeperiod=14
+            )
+            
+            # Average Directional Index (ADX)
+            indicators['ADX'] = talib.ADX(
+                high_prices, 
+                low_prices, 
+                close_prices, 
+                timeperiod=14
+            )
+            
             # Добавляем все индикаторы в DataFrame и заполняем NaN
             for name, values in indicators.items():
                 df[name] = values
