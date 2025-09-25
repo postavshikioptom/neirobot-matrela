@@ -82,6 +82,7 @@ python visual_graph.py --data historical_data.csv --symbol ADAUSDT
 
 
 python test_patterns.py - проверка паттернов на работоспособность
+python optimize_label_thresholds.py --data historical_data.csv -  #числа соотношения BUY HOLD SELL сам ставить в config TARGET_CLASS_RATIOS    или с выводом в файл логов: ||    python "e:\MAX\PYTHON\NEURAL-BOTS\neirobot-matrela\optimize_label_thresholds.py" --data "e:\MAX\PYTHON\NEURAL-BOTS\neirobot-matrela\historical_data.csv" --out "e:\MAX\PYTHON\NEURAL-BOTS\neirobot-matrela\threshold_sweep_results.json"   || - оптимизация баланса классов. Запускаешь и настраивает коддер сам, какие параметры нужно ставить в config для BUY SELL HOLD
 
 
 

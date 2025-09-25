@@ -9,6 +9,11 @@ import config # 🔥 ДОБАВЛЕНО: Импорт config для параме
 import gc
 from collections import deque
 import logging
+# 🔥 ДОБАВЛЕНО: Безопасный импорт psutil для контроля памяти
+try:
+    import psutil
+except Exception:
+    psutil = None
 
 def log_nan_inf_stats(df, stage_name="Unknown"):
     """🔥 ДОБАВЛЕНО: Логирование статистики NaN и inf значений"""
@@ -698,8 +703,9 @@ class FeatureEngineering:
             #     print(f"Принудительно снижаем адаптивный порог до рекомендованного: {recommended_threshold_from_log:.6f}")
             #     adaptive_threshold = recommended_threshold_from_log
                 
-            print(f"[ADAPTIVE] Base threshold: {base_threshold:.6f}, ATR: {normalized_atr:.6f}, "
-                  f"Adaptive threshold: {adaptive_threshold:.6f}")
+            # Если будут проблемы с балансом классов на этапе формирования данных, раскомментировать
+            # print(f"[ADAPTIVE] Base threshold: {base_threshold:.6f}, ATR: {normalized_atr:.6f}, "
+            #       f"Adaptive threshold: {adaptive_threshold:.6f}")
             
             return adaptive_threshold
             
@@ -769,10 +775,12 @@ class FeatureEngineering:
         labels = []
 
         # DEBUG: лог входных параметров и короткого среза цен
+        # Если будут проблемы с балансом классов на этапе формирования данных, раскомментировать
         try:
-            print(f"[LABELS DEBUG] adaptive_threshold={adaptive_threshold}, future_window={config.FUTURE_WINDOW}, len(prices)={len(prices)}")
+            # print(f"[LABELS DEBUG] adaptive_threshold={adaptive_threshold}, future_window={config.FUTURE_WINDOW}, len(prices)={len(prices)}")
             # print("[LABELS DEBUG] first 8 closes:", prices[:8].tolist())
             # print("[LABELS DEBUG] last 8 closes:", prices[-8:].tolist())
+            pass
         except Exception:
             pass
 
@@ -802,7 +810,8 @@ class FeatureEngineering:
         # Логирование распределения меток
         vals, counts = np.unique(labels, return_counts=True)
         dist = {int(v): int(c) for v, c in zip(vals, counts)}
-        print(f"[LABELS DEBUG] label distribution (SELL=0,HOLD=1,BUY=2): {dist}")
+        # Если будут проблемы с дисбалансом классов на этапе формирования данных, опять это раскомментировать
+        # print(f"[LABELS DEBUG] label distribution (SELL=0,HOLD=1,BUY=2): {dist}")
         
         # Анализ дисбаланса
         total = len(labels)
@@ -897,3 +906,337 @@ class FeatureEngineering:
         else:
             print("Не удалось найти сохраненный скейлер")
             return False
+
+
+def smote_time_series(X, y, minority_class=0, k_neighbors=5, n_samples=None):
+    """
+    SMOTE для временных рядов - синтетическая генерация последовательностей
+
+    Args:
+        X (np.array): Временные последовательности shape (n_samples, seq_len, n_features)
+        y (np.array): Метки классов
+        minority_class (int): Класс для которого генерируем синтетические данные
+        k_neighbors (int): Количество ближайших соседей для интерполяции
+        n_samples (int): Количество синтетических образцов для генерации
+
+    Returns:
+        tuple: (X_augmented, y_augmented) - расширенные данные
+    """
+    from sklearn.neighbors import NearestNeighbors
+    import random
+    import psutil
+    import gc
+
+    print(f"🔄 SMOTE: Начало генерации синтетических данных для класса {minority_class}")
+
+    try:
+        # Проверяем доступную память
+        available_memory_gb = psutil.virtual_memory().available / (1024**3)
+        print(f"💾 SMOTE: Доступная память: {available_memory_gb:.2f} GB")
+        
+        if available_memory_gb < 1.0:  # 🔥 ИЗМЕНЕНО: Уменьшили требования с 2.0 до 1.0 GB
+            print(f"⚠️ SMOTE: Недостаточно памяти ({available_memory_gb:.2f} GB < 1.0 GB). Пропускаем SMOTE.")
+            return X, y
+
+        # Находим индексы minority класса
+        minority_indices = np.where(y == minority_class)[0]
+        n_minority = len(minority_indices)
+
+        if n_minority == 0:
+            print(f"⚠️ SMOTE: Нет образцов класса {minority_class}")
+            return X, y
+
+        # 🔥 КРИТИЧЕСКОЕ ОГРАНИЧЕНИЕ: Если minority класс слишком большой, ограничиваем его
+        MAX_MINORITY_SIZE = 50000  # Максимум 50k образцов для SMOTE
+        if n_minority > MAX_MINORITY_SIZE:
+            print(f"⚠️ SMOTE: Minority класс слишком большой ({n_minority} > {MAX_MINORITY_SIZE})")
+            print(f"🔄 SMOTE: Используем случайную выборку из {MAX_MINORITY_SIZE} образцов")
+            
+            # Случайная выборка из minority класса
+            random_indices = np.random.choice(minority_indices, size=MAX_MINORITY_SIZE, replace=False)
+            minority_indices = random_indices
+            n_minority = len(minority_indices)
+
+        # Определяем количество синтетических образцов
+        if n_samples is None:
+            n_samples = n_minority
+        
+        # 🔥 ОГРАНИЧИВАЕМ количество генерируемых образцов
+        MAX_SYNTHETIC_SAMPLES = 25000
+        if n_samples > MAX_SYNTHETIC_SAMPLES:
+            print(f"⚠️ SMOTE: Ограничиваем генерацию с {n_samples} до {MAX_SYNTHETIC_SAMPLES} образцов")
+            n_samples = MAX_SYNTHETIC_SAMPLES
+
+        print(f"🔄 SMOTE: Minority класс имеет {n_minority} образцов, генерируем {n_samples} синтетических")
+
+        # Подготавливаем массивы для синтетических данных
+        synthetic_X = []
+        synthetic_y = []
+
+        # Обучаем KNN на minority классе
+        minority_X = X[minority_indices]
+        print(f"🔄 SMOTE: Подготавливаем данные для KNN, размер: {minority_X.shape}")
+        
+        minority_X_flat = minority_X.reshape(minority_X.shape[0], -1)  # Flatten для KNN
+        print(f"🔄 SMOTE: Flattened размер: {minority_X_flat.shape}")
+
+        # 🔥 ДОБАВЛЯЕМ обработку исключений для KNN
+        print(f"🔄 SMOTE: Обучаем KNN с {k_neighbors} соседями...")
+        nbrs = NearestNeighbors(n_neighbors=min(k_neighbors+1, n_minority), algorithm='ball_tree')
+        nbrs.fit(minority_X_flat)
+        print(f"✅ SMOTE: KNN обучен успешно")
+        
+        distances, indices = nbrs.kneighbors(minority_X_flat)
+        print(f"✅ SMOTE: Найдены ближайшие соседи")
+
+        # Генерируем синтетические образцы батчами
+        BATCH_SIZE = 1000
+        for batch_start in range(0, n_samples, BATCH_SIZE):
+            batch_end = min(batch_start + BATCH_SIZE, n_samples)
+            batch_size = batch_end - batch_start
+            
+            print(f"🔄 SMOTE: Обрабатываем батч {batch_start+1}-{batch_end}/{n_samples}")
+            
+            for i in range(batch_size):
+                # Выбираем случайный образец из minority класса
+                random_idx = random.randint(0, n_minority - 1)
+                sample = minority_X[random_idx]
+
+                # Выбираем случайного соседа (исключая самого себя)
+                available_neighbors = indices[random_idx][1:]  # Исключаем самого себя
+                if len(available_neighbors) == 0:
+                    # Если нет соседей, используем сам образец
+                    neighbor = sample
+                else:
+                    neighbor_idx = random.choice(available_neighbors)
+                    neighbor = minority_X[neighbor_idx]
+
+                # Интерполируем между sample и neighbor
+                alpha = random.random()
+                synthetic_sample = sample + alpha * (neighbor - sample)
+
+                synthetic_X.append(synthetic_sample)
+                synthetic_y.append(minority_class)
+            
+            # Очищаем память после каждого батча
+            if (batch_end) % 5000 == 0:
+                gc.collect()
+                available_memory_gb = psutil.virtual_memory().available / (1024**3)
+                print(f"💾 SMOTE: Память после батча: {available_memory_gb:.2f} GB")
+                
+                if available_memory_gb < 1.0:
+                    print(f"⚠️ SMOTE: Критически мало памяти! Останавливаем генерацию на {batch_end} образцах")
+                    break
+
+        print(f"🔄 SMOTE: Конвертируем {len(synthetic_X)} синтетических образцов в numpy массивы...")
+        
+        # Конвертируем в numpy массивы
+        if len(synthetic_X) > 0:
+            synthetic_X = np.array(synthetic_X)
+            synthetic_y = np.array(synthetic_y)
+            
+            print(f"✅ SMOTE: Синтетические данные созданы: {synthetic_X.shape}")
+
+            # Объединяем оригинальные и синтетические данные
+            X_augmented = np.concatenate([X, synthetic_X], axis=0)
+            y_augmented = np.concatenate([y, synthetic_y], axis=0)
+
+            print(f"✅ SMOTE: Данные расширены с {len(X)} до {len(X_augmented)} образцов")
+            print(f"   Класс {minority_class}: {n_minority} -> {n_minority + len(synthetic_y)}")
+            
+            # Финальная очистка памяти
+            del synthetic_X, synthetic_y, minority_X, minority_X_flat
+            gc.collect()
+
+            return X_augmented, y_augmented
+        else:
+            print(f"⚠️ SMOTE: Не удалось сгенерировать синтетические образцы")
+            return X, y
+
+    except Exception as e:
+        print(f"❌ КРИТИЧЕСКАЯ ОШИБКА в SMOTE: {e}")
+        import traceback
+        traceback.print_exc()
+        print(f"🔄 SMOTE: Возвращаем оригинальные данные без изменений")
+        return X, y
+
+
+def apply_smote_to_training_data(X_train, y_train, target_class_distribution=None):
+    """
+    Применяет SMOTE к тренировочным данным для балансировки классов
+
+    Args:
+        X_train (np.array): Тренировочные последовательности
+        y_train (np.array): Метки тренировочных данных
+        target_class_distribution (dict): Целевое распределение классов {class: percentage}
+
+    Returns:
+        tuple: (X_balanced, y_balanced) - сбалансированные данные
+    """
+    try:
+        print("🔄 Начинаем SMOTE балансировку классов...")
+
+        # Проверяем размер данных
+        print(f"📊 Размер входных данных: X_train={X_train.shape}, y_train={y_train.shape}")
+        
+        # Если данных слишком много, предупреждаем
+        if len(X_train) > 500000:
+            print(f"⚠️ ВНИМАНИЕ: Очень большой размер данных ({len(X_train)} образцов)")
+            print(f"⚠️ SMOTE может занять много времени и памяти")
+
+        # Анализируем текущее распределение
+        unique_classes, counts = np.unique(y_train, return_counts=True)
+        total_samples = len(y_train)
+
+        current_distribution = {}
+        for cls, count in zip(unique_classes, counts):
+            current_distribution[cls] = count / total_samples * 100
+
+        print("📊 Текущее распределение классов:")
+        for cls, percentage in current_distribution.items():
+            print(f"   Класс {cls}: {percentage:.2f}% ({counts[list(unique_classes).index(cls)]} образцов)")
+
+        # Если целевое распределение не задано, используем равномерное
+        if target_class_distribution is None:
+            target_percentage = 100.0 / len(unique_classes)
+            target_class_distribution = {cls: target_percentage for cls in unique_classes}
+
+        print("🎯 Целевое распределение классов:")
+        for cls, percentage in target_class_distribution.items():
+            print(f"   Класс {cls}: {percentage:.2f}%")
+
+        X_balanced = X_train.copy()
+        y_balanced = y_train.copy()
+
+        # Применяем SMOTE для каждого minority класса
+        for cls in unique_classes:
+            if cls not in target_class_distribution:
+                continue
+
+            current_count = counts[list(unique_classes).index(cls)]
+            target_count = int(total_samples * target_class_distribution[cls] / 100.0)
+            samples_to_generate = max(0, target_count - current_count)
+
+            if samples_to_generate > 0:
+                print(f"🔄 Генерируем {samples_to_generate} образцов для класса {cls}")
+                try:
+                    X_balanced, y_balanced = smote_time_series(
+                        X_balanced, y_balanced,
+                        minority_class=cls,
+                        n_samples=samples_to_generate
+                    )
+                    print(f"✅ Успешно сгенерированы образцы для класса {cls}")
+                except Exception as e:
+                    print(f"❌ Ошибка при генерации образцов для класса {cls}: {e}")
+                    print(f"🔄 Продолжаем без генерации для этого класса")
+                    continue
+
+        # Финальная проверка распределения
+        final_unique_classes, final_counts = np.unique(y_balanced, return_counts=True)
+        final_total = len(y_balanced)
+
+        print("✅ Финальное распределение после SMOTE:")
+        for cls, count in zip(final_unique_classes, final_counts):
+            percentage = count / final_total * 100
+            print(f"   Класс {cls}: {percentage:.2f}% ({count} образцов)")
+
+        print(f"📊 Итоговый размер данных: {X_balanced.shape}")
+        print("🎉 SMOTE балансировка завершена успешно!")
+        return X_balanced, y_balanced
+
+    except Exception as e:
+        print(f"❌ КРИТИЧЕСКАЯ ОШИБКА в apply_smote_to_training_data: {e}")
+        import traceback
+        traceback.print_exc()
+        print(f"🔄 Возвращаем оригинальные данные без SMOTE")
+        return X_train, y_train
+
+
+def apply_chunked_smote(X_train, y_train,
+                         minority_classes=(0, 1),
+                         max_synth_per_class=15000,
+                         memory_guard_gb=1.5,
+                         chunk_size=2000,
+                         verbose=True):
+    """
+    Память-осознанный (chunked) SMOTE: добавляет синтетику по блокам и с капами на класс.
+    - Останавливается заранее, если мало доступной памяти.
+    - Ограничивает общее число синтетики для каждого класса.
+    - Работает итеративно небольшими порциями.
+    """
+    try:
+        if verbose:
+            print("🔄 Запуск apply_chunked_smote (memory-aware)")
+        X_bal = X_train.copy()
+        y_bal = y_train.copy()
+
+        if psutil is None:
+            if verbose:
+                print("⚠️ psutil недоступен — выполняем обычный SMOTE без контроля памяти")
+            return apply_smote_to_training_data(X_bal, y_bal, {0:25.0,1:25.0,2:50.0})
+
+        # Быстрая оценка памяти
+        avail_gb = psutil.virtual_memory().available / (1024**3)
+        if avail_gb < memory_guard_gb:
+            print(f"⚠️ Мало свободной памяти ({avail_gb:.2f}GB < {memory_guard_gb}GB). Пропускаем SMOTE.")
+            return X_train, y_train
+
+        # Текущее распределение и цели
+        unique, counts = np.unique(y_bal, return_counts=True)
+        dist = {int(k): int(v) for k, v in zip(unique, counts)}
+        total = len(y_bal)
+        if verbose:
+            print(f"📊 Текущее распределение: {dist}")
+
+        caps = {cls: max_synth_per_class for cls in minority_classes}
+        generated = {cls: 0 for cls in minority_classes}
+
+        while True:
+            made_progress = False
+            for cls in minority_classes:
+                if generated[cls] >= caps[cls]:
+                    continue
+                # Целимся к долям из config.TARGET_CLASS_RATIOS, если есть, иначе мягкая цель 30/30/40
+                target_ratios = getattr(config, 'TARGET_CLASS_RATIOS', [0.3,0.3,0.4])
+                target_count = int((total + sum(generated.values())) * target_ratios[cls])
+                current_count = dist.get(cls, 0) + generated[cls]
+                remain = max(0, min(caps[cls] - generated[cls], target_count - current_count))
+                if remain <= 0:
+                    continue
+                step = min(chunk_size, remain)
+
+                if verbose:
+                    print(f"🔧 Генерируем chunk {step} для класса {cls} (суммарно {generated[cls]}/{caps[cls]})")
+
+                # Контроль памяти на каждом шаге
+                avail_gb = psutil.virtual_memory().available / (1024**3)
+                if avail_gb < memory_guard_gb:
+                    print(f"⚠️ Память просела до {avail_gb:.2f}GB — останавливаем SMOTE")
+                    return X_bal, y_bal
+
+                try:
+                    X_bal, y_bal = smote_time_series(
+                        X_bal, y_bal,
+                        minority_class=cls,
+                        n_samples=step
+                    )
+                    generated[cls] += step
+                    total += step
+                    made_progress = True
+                except Exception as e:
+                    print(f"❌ Ошибка SMOTE в блоке для класса {cls}: {e}")
+                    continue
+
+            if not made_progress:
+                break
+
+        if verbose:
+            u2, c2 = np.unique(y_bal, return_counts=True)
+            print("✅ Итог после chunked SMOTE:", {int(k): int(v) for k, v in zip(u2, c2)})
+        return X_bal, y_bal
+
+    except Exception as e:
+        print(f"❌ КРИТИЧЕСКАЯ ОШИБКА в apply_chunked_smote: {e}")
+        import traceback
+        traceback.print_exc()
+        return X_train, y_train

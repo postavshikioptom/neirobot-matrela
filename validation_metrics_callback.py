@@ -35,7 +35,8 @@ class ValidationMetricsCallback(tf.keras.callbacks.Callback):
         self.validation_in_progress = False 
         
     def on_epoch_end(self, epoch, logs=None):
-        if (epoch + 1) % 5 == 0:
+        # 🔥 ИЗМЕНЕНО: Проверяем каждую эпоху для быстрого реагирования на дисбаланс
+        if (epoch + 1) % 1 == 0:  # Каждую эпоху вместо каждой 5-й
             # 🔥 ИСПРАВЛЕНО: Асинхронная валидация
             if not self.validation_in_progress:
                 self.validation_in_progress = True

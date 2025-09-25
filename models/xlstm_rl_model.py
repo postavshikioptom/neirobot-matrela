@@ -4,6 +4,7 @@ import numpy as np
 import os
 import tensorflow.keras.backend as K
 import gc
+import config
 
 # Безопасный импорт
 try:
@@ -16,28 +17,72 @@ except ImportError as e:
 
 class FocalLoss(tf.keras.losses.Loss):
     """
-    Focal Loss для борьбы с дисбалансом классов
-    Автоматически адаптируется к любому распределению классов
+    Ассиметричная Focal Loss с поддержкой per-class alpha/gamma,
+    Class-Conditional Label Smoothing и опциональным штрафом за
+    сверх-уверенные BUY (entropy penalty).
     """
-    def __init__(self, alpha=0.25, gamma=2.0, label_smoothing=0.1, **kwargs):
+    def __init__(self,
+                 alpha=0.25,
+                 gamma=2.0,
+                 label_smoothing=0.1,
+                 per_class_alpha=None,   # [α_SELL, α_HOLD, α_BUY]
+                 per_class_gamma=None,   # [γ_SELL, γ_HOLD, γ_BUY]
+                 per_class_smoothing=None,  # [s_SELL, s_HOLD, s_BUY]
+                 entropy_penalty_lambda=0.0,  # λ for BUY confidence penalty
+                 **kwargs):
         super().__init__(**kwargs)
         self.alpha = alpha
         self.gamma = gamma
         self.label_smoothing = label_smoothing
+        self.per_class_alpha = per_class_alpha
+        self.per_class_gamma = per_class_gamma
+        self.per_class_smoothing = per_class_smoothing
+        self.entropy_penalty_lambda = entropy_penalty_lambda
     
     def call(self, y_true, y_pred):
-        # Label smoothing для регуляризации
-        num_classes = tf.cast(tf.shape(y_pred)[-1], tf.float32)
-        y_true_smooth = y_true * (1.0 - self.label_smoothing) + self.label_smoothing / num_classes
+        # Ensure y_true is rank-1 (sparse labels)
+        y_true = tf.cast(tf.reshape(y_true, [-1]), tf.int32)
+        num_classes = tf.shape(y_pred)[-1]
+        num_classes_f = tf.cast(num_classes, tf.float32)
         
-        # Вычисляем cross-entropy loss
-        ce_loss = tf.keras.losses.sparse_categorical_crossentropy(y_true, y_pred, from_logits=False)
+        # One-hot and per-class label smoothing
+        y_true_onehot = tf.one_hot(y_true, depth=num_classes, dtype=tf.float32)
+        if self.per_class_smoothing is not None:
+            smoothing_vec = tf.gather(tf.constant(self.per_class_smoothing, dtype=tf.float32), y_true)
+        else:
+            smoothing_vec = tf.fill(tf.shape(y_true), tf.cast(self.label_smoothing, tf.float32))
+        smoothing_vec = tf.expand_dims(smoothing_vec, axis=-1)
+        y_true_smooth = y_true_onehot * (1.0 - smoothing_vec) + smoothing_vec / num_classes_f
         
-        # Вычисляем p_t (вероятность правильного класса)
-        p_t = tf.exp(-ce_loss)
+        # Cross-entropy with smoothed labels
+        y_pred = tf.clip_by_value(y_pred, 1e-7, 1.0 - 1e-7)
+        ce_loss = -tf.reduce_sum(y_true_smooth * tf.math.log(y_pred), axis=-1)
         
-        # Focal Loss формула: FL(p_t) = -α_t * (1 - p_t)^γ * log(p_t)
-        focal_loss = self.alpha * tf.pow(1 - p_t, self.gamma) * ce_loss
+        # p_t: probability assigned to the true class
+        p_t = tf.reduce_sum(y_true_onehot * y_pred, axis=-1)
+        
+        # Per-class alpha and gamma
+        if self.per_class_alpha is not None:
+            alpha_t = tf.gather(tf.constant(self.per_class_alpha, dtype=tf.float32), y_true)
+        else:
+            alpha_t = tf.fill(tf.shape(y_true), tf.cast(self.alpha, tf.float32))
+        
+        if self.per_class_gamma is not None:
+            gamma_t = tf.gather(tf.constant(self.per_class_gamma, dtype=tf.float32), y_true)
+        else:
+            gamma_t = tf.fill(tf.shape(y_true), tf.cast(self.gamma, tf.float32))
+        
+        focal_factor = tf.pow(1.0 - p_t, gamma_t)
+        focal_loss = alpha_t * focal_factor * ce_loss
+        
+        # 🔥 УЛУЧШЕНО: Entropy penalty для всех классов с высокой уверенностью
+        if self.entropy_penalty_lambda > 0.0:
+            entropy = -tf.reduce_sum(y_pred * tf.math.log(y_pred), axis=-1)
+            # Применяем штраф к любому классу с уверенностью > 0.8
+            max_pred = tf.reduce_max(y_pred, axis=-1)
+            high_confidence = tf.cast(tf.greater(max_pred, 0.8), tf.float32)
+            penalty = self.entropy_penalty_lambda * (1.0 - entropy) * high_confidence
+            focal_loss = focal_loss + penalty
         
         return focal_loss
     
@@ -46,7 +91,11 @@ class FocalLoss(tf.keras.losses.Loss):
         config.update({
             'alpha': self.alpha,
             'gamma': self.gamma,
-            'label_smoothing': self.label_smoothing
+            'label_smoothing': self.label_smoothing,
+            'per_class_alpha': self.per_class_alpha,
+            'per_class_gamma': self.per_class_gamma,
+            'per_class_smoothing': self.per_class_smoothing,
+            'entropy_penalty_lambda': self.entropy_penalty_lambda,
         })
         return config
 
@@ -54,29 +103,76 @@ class FocalLoss(tf.keras.losses.Loss):
 class WarmUpCosineDecayScheduler(tf.keras.callbacks.Callback):
     """
     Learning Rate Scheduler с WarmUp и Cosine Decay
-    Улучшает стабильность обучения и конвергенцию
+    Улучшает стабильность обучения и конвергенцию. Пик берём из config.LR_BASE.
     """
-    def __init__(self, warmup_epochs=5, total_epochs=50, base_lr=0.001, min_lr=1e-6):
+    def __init__(self, warmup_epochs=2, total_epochs=50, base_lr=None, min_lr=1e-6):
         super().__init__()
         self.warmup_epochs = warmup_epochs
         self.total_epochs = total_epochs
-        self.base_lr = base_lr
+        # Base LR может приходить извне, иначе из config
+        self.base_lr = base_lr if base_lr is not None else getattr(config, 'LR_BASE', 6e-4)
         self.min_lr = min_lr
         
     def on_epoch_begin(self, epoch, logs=None):
         if epoch < self.warmup_epochs:
             # WarmUp phase: линейное увеличение LR
-            lr = self.base_lr * (epoch + 1) / self.warmup_epochs
+            lr = self.base_lr * (epoch + 1) / max(1, self.warmup_epochs)
         else:
             # Cosine Decay phase
-            progress = (epoch - self.warmup_epochs) / (self.total_epochs - self.warmup_epochs)
+            progress = (epoch - self.warmup_epochs) / max(1, (self.total_epochs - self.warmup_epochs))
+            progress = np.clip(progress, 0.0, 1.0)
             lr = self.min_lr + (self.base_lr - self.min_lr) * 0.5 * (1 + np.cos(np.pi * progress))
         
-        self.model.optimizer.learning_rate.assign(lr)
-        print(f"Epoch {epoch + 1}: Установлена скорость обучения: {lr:.6f}")
+        try:
+            self.model.optimizer.learning_rate.assign(lr)
+            print(f"Epoch {epoch + 1}: Установлена скорость обучения: {lr:.6f}")
+        except Exception as e:
+            print(f"[LR SCHED] skip assign: {e}")
 
 
 
+
+
+class EMAWeightsCallback(tf.keras.callbacks.Callback):
+    """Экспоненциальное сглаживание весов. Поддерживает валидацию на EMA-весах.
+    - Обновляет EMA после каждого батча
+    - На валидации может временно подменять веса на EMA и возвращать обратно
+    """
+    def __init__(self, decay=None, use_for_validation=None):
+        super().__init__()
+        self.decay = float(decay if decay is not None else getattr(config, 'EMA_DECAY', 0.999))
+        self.use_for_validation = bool(use_for_validation if use_for_validation is not None else getattr(config, 'USE_EMA_VALIDATION', True))
+        self.ema_weights = None
+        self.train_weights = None
+    
+    def on_train_begin(self, logs=None):
+        # model.get_weights() уже возвращает numpy arrays, не нужно вызывать .numpy()
+        weights = self.model.get_weights()
+        self.ema_weights = [w.copy() if hasattr(w, 'copy') else np.array(w).copy() for w in weights]
+    
+    def on_train_batch_end(self, batch, logs=None):
+        current = self.model.get_weights()
+        for i in range(len(self.ema_weights)):
+            self.ema_weights[i] = self.decay * self.ema_weights[i] + (1.0 - self.decay) * current[i]
+    
+    def on_test_begin(self, logs=None):
+        if not self.use_for_validation:
+            return
+        try:
+            self.train_weights = self.model.get_weights()
+            self.model.set_weights(self.ema_weights)
+        except Exception as e:
+            print(f"[EMA] skip swap to EMA on validation begin: {e}")
+    
+    def on_test_end(self, logs=None):
+        if not self.use_for_validation:
+            return
+        try:
+            if self.train_weights is not None:
+                self.model.set_weights(self.train_weights)
+                self.train_weights = None
+        except Exception as e:
+            print(f"[EMA] skip restore train weights after validation: {e}")
 
 
 class XLSTMRLModel:
@@ -87,13 +183,26 @@ class XLSTMRLModel:
         self.input_shape = input_shape
         self.memory_size = memory_size
         self.memory_units = memory_units
-        # 🔥 ДОБАВЛЕНО: Параметры регуляризации
-        self.weight_decay = 5e-4
+        # 🔥 ДОБАВЛЕНО: Параметры регуляризации (подключены к config)
+        self.weight_decay = float(getattr(config, 'WEIGHT_DECAY_L2', weight_decay))
+        self.dropout_rnn1 = float(getattr(config, 'DROPOUT_RNN1', 0.6))
+        self.dropout_rnn2 = float(getattr(config, 'DROPOUT_RNN2', 0.5))
         self.gradient_clip_norm = gradient_clip_norm
         
         # 🔥 ИСПРАВЛЕНО: Добавьте эти строки для инициализации моделей
         self.actor_model = self._build_actor_model()
         self.critic_model = self._build_critic_model()
+        
+        # Инициализация bias последнего слоя под целевые доли (SELL,HOLD,BUY)
+        try:
+            priors = np.array(getattr(config, 'TARGET_CLASS_RATIOS', [0.33, 0.40, 0.33]), dtype=np.float32)
+            logits_bias = np.log(np.clip(priors, 1e-8, 1.0))
+            last_dense = self.actor_model.get_layer('classifier')
+            # Если softmax, сдвиг bias допустим
+            last_dense.bias.assign(logits_bias)
+            print(f"[INIT] classifier bias set to log-priors: {priors}")
+        except Exception as e:
+            print(f"[INIT] skip classifier bias init: {e}")
         
         # Настройка оптимизаторов с учетом доступного устройства
         self._configure_optimizers()
@@ -113,7 +222,8 @@ class XLSTMRLModel:
                 self.supervised_optimizer = tf.keras.optimizers.Adam(
                     clipnorm=self.gradient_clip_norm
                 )
-                self.supervised_optimizer.learning_rate = tf.Variable(0.001)
+                # Use configurable base LR for supervised phase (stabilize early training)
+                self.supervised_optimizer.learning_rate = tf.Variable(getattr(config, 'LR_BASE', 6e-4))
                 self.actor_optimizer = tf.keras.optimizers.Adam(
                     clipnorm=self.gradient_clip_norm
                 )
@@ -128,7 +238,8 @@ class XLSTMRLModel:
                 self.supervised_optimizer = tf.keras.optimizers.Adam(
                     clipnorm=self.gradient_clip_norm
                 )
-                self.supervised_optimizer.learning_rate = tf.Variable(0.0005)
+                # Use configurable base LR for CPU as well
+                self.supervised_optimizer.learning_rate = tf.Variable(getattr(config, 'LR_BASE', 6e-4))
                 self.actor_optimizer = tf.keras.optimizers.Adam(
                     clipnorm=self.gradient_clip_norm
                 )
@@ -163,10 +274,9 @@ class XLSTMRLModel:
         x = layers.BatchNormalization()(inputs)
         # print(f"DEBUG Actor Model: x shape={x.shape} (after BatchNormalization)")
         
-        # 🔥 ДОБАВЛЕНО: Проверка размерностей входа (оставляем)
-        expected_features = 14  # базовые + индикаторы
-        if self.input_shape[-1] != expected_features:
-            print(f"⚠️ Неожиданная размерность входа: {self.input_shape[-1]}, ожидалось {expected_features}")
+        # 🔥 ОБНОВЛЕНО: Динамическая проверка размерности без жёсткого числа фичей
+        expected_features = self.input_shape[-1]
+        # print(f"[INFO] Входных признаков: {expected_features}")
         
         # Первый слой xLSTM с weight decay
         # print(f"DEBUG Actor Model: x shape={x.shape} (before first RNN)")
@@ -177,7 +287,8 @@ class XLSTMRLModel:
         # print(f"DEBUG Actor Model: x shape={x.shape} (after first RNN)")
         
         x = layers.LayerNormalization()(x)
-        x = layers.Dropout(0.4)(x)
+        # Dropout after first RNN, configurable via config
+        x = layers.Dropout(self.dropout_rnn1)(x)
         
         # Второй слой xLSTM (уменьшенный размер)
         # print(f"DEBUG Actor Model: x shape={x.shape} (before second RNN)")
@@ -188,7 +299,8 @@ class XLSTMRLModel:
         # print(f"DEBUG Actor Model: x shape={x.shape} (after second RNN)")
         
         x = layers.LayerNormalization()(x)
-        x = layers.Dropout(0.3)(x)
+        # Dropout after second RNN, configurable via config
+        x = layers.Dropout(self.dropout_rnn2)(x)
         
         # 🔥 ИСПРАВЛЕНО: Правильные residual connections с проверкой размерностей
         dense1 = layers.Dense(
@@ -196,7 +308,7 @@ class XLSTMRLModel:
             activation='relu',
             kernel_regularizer=tf.keras.regularizers.l2(self.weight_decay)
         )(x)
-        dense1 = layers.Dropout(0.3)(dense1)
+        dense1 = layers.Dropout(0.5)(dense1)
         
         dense2 = layers.Dense(
             64, 
@@ -230,7 +342,8 @@ class XLSTMRLModel:
             3, 
             activation='softmax',
             kernel_regularizer=tf.keras.regularizers.l2(self.weight_decay),
-            kernel_constraint=tf.keras.constraints.MaxNorm(max_value=2.0) # 🔥 РАСКОММЕНТИРОВАТЬ
+            kernel_constraint=tf.keras.constraints.MaxNorm(max_value=2.0),
+            name='classifier'
         )(x)
         
         model = models.Model(inputs=inputs, outputs=outputs)
@@ -260,9 +373,9 @@ class XLSTMRLModel:
                                        memory_size=self.memory_size),
                       return_sequences=True)(x)
         # print(f"DEBUG Critic Model: x shape={x.shape} (after first RNN)")
-        
+
         x = layers.LayerNormalization()(x)
-        x = layers.Dropout(0.2)(x)
+        x = layers.Dropout(0.4)(x)
         
         # Второй слой xLSTM
         # print(f"DEBUG Critic Model: x shape={x.shape} (before second RNN)")
@@ -270,9 +383,9 @@ class XLSTMRLModel:
                                        memory_size=self.memory_size),
                       return_sequences=False)(x)
         # print(f"DEBUG Critic Model: x shape={x.shape} (after second RNN)")
-        
+
         x = layers.LayerNormalization()(x)
-        x = layers.Dropout(0.2)(x)
+        x = layers.Dropout(0.4)(x)
         
         # Полносвязные слои С РЕГУЛЯРИЗАЦИЕЙ
         # print(f"DEBUG Critic Model: x shape={x.shape} (before first Dense)")
@@ -304,17 +417,66 @@ class XLSTMRLModel:
         return model
 
     def compile_for_supervised_learning(self):
-        """Компилирует модель для этапа 1: Supervised Learning с Focal Loss"""
-        # Создаем Focal Loss для борьбы с дисбалансом классов
-        focal_loss = FocalLoss(alpha=0.25, gamma=2.0, label_smoothing=0.1)
+        """Компилирует модель для этапа 1: Supervised Learning с плавным переходом CE→AFL"""
+        # Этап 1–N_warm: смешанная потеря CE и AFL для более стабильного старта
+        warm_epochs = int(getattr(config, 'AFL_WARMUP_EPOCHS', 5))
+        ce_weight_start = float(getattr(config, 'CE_WEIGHT_START', 0.8))  # начальный вес CE
+        ce_weight_end = float(getattr(config, 'CE_WEIGHT_END', 0.0))      # к концу warmup CE уходит
+        
+        # Базовые компоненты потерь
+        focal_loss = FocalLoss(
+            per_class_alpha=getattr(config, 'AFL_ALPHA', None),
+            per_class_gamma=getattr(config, 'AFL_GAMMA', None),
+            per_class_smoothing=getattr(config, 'CLASS_SMOOTHING', None),
+            entropy_penalty_lambda=getattr(config, 'ENTROPY_PENALTY_LAMBDA', 0.0),
+            alpha=0.25,
+            gamma=2.0,
+            label_smoothing=0.1,
+        )
+        ce_loss = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=False)
+        
+        class MixedLoss(tf.keras.losses.Loss):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                # Создаем tf.Variable на том же устройстве, что и модель
+                with tf.device('/GPU:0' if tf.config.list_physical_devices('GPU') else '/CPU:0'):
+                    self.epoch_var = tf.Variable(0.0, trainable=False, dtype=tf.float32, name='mixed_loss_epoch')
+                
+            def set_epoch(self, epoch):
+                """Устанавливает текущую эпоху"""
+                self.epoch_var.assign(float(epoch))
+                
+            def call(self, y_true, y_pred):
+                # Линейная интерполяция веса CE в зависимости от текущей эпохи
+                if warm_epochs > 0:
+                    t = tf.clip_by_value(self.epoch_var / float(warm_epochs), 0.0, 1.0)
+                else:
+                    t = 1.0
+                ce_w = ce_weight_start * (1.0 - t) + ce_weight_end * t
+                afl_w = 1.0 - ce_w
+                return ce_w * ce_loss(y_true, y_pred) + afl_w * focal_loss(y_true, y_pred)
+        
+        mixed_loss = MixedLoss(name='mixed_ce_afl')
+        
+        class EpochTracker(tf.keras.callbacks.Callback):
+            def on_epoch_begin(self, epoch, logs=None):
+                # Передаем текущую эпоху в лосс, чтобы он плавно менял веса
+                try:
+                    if hasattr(self.model, 'loss') and hasattr(self.model.loss, 'set_epoch'):
+                        self.model.loss.set_epoch(int(epoch))
+                except Exception as e:
+                    print(f"[MixedLoss] skip epoch assign: {e}")
+        
+        self._mixed_loss_callback = EpochTracker()
         
         self.actor_model.compile(
             optimizer=self.supervised_optimizer,
-            loss=focal_loss,  # Заменили на Focal Loss
+            loss=mixed_loss,
             metrics=['accuracy'],
-            run_eagerly=False
+            run_eagerly=False,
+            jit_compile=True  # Включаем XLA для ускорения
         )
-        print("✅ Модель скомпилирована для supervised learning с Focal Loss (α=0.25, γ=2.0)")
+        print("✅ Модель скомпилирована: смешанная потеря CE→AFL с линейным спадом CE в первые эпохи")
 
     def compile_for_reward_modeling(self):
         """Компилирует модель для этапа 2: Reward Model Training"""
@@ -325,7 +487,8 @@ class XLSTMRLModel:
         self.critic_model.compile(
             optimizer=optimizer,
             loss='mse',
-            metrics=['mae']
+            metrics=['mae'],
+            jit_compile=True  # Включаем XLA для ускорения
         )
         print("✅ Модель скомпилирована для reward modeling")
 
@@ -334,14 +497,20 @@ class XLSTMRLModel:
         Возвращает улучшенные callbacks для обучения
         """
         callbacks = [
-            # WarmUp + Cosine Decay Learning Rate
+            # WarmUp + Cosine Decay Learning Rate (lower peak, shorter warmup)
             WarmUpCosineDecayScheduler(
-                warmup_epochs=5,
+                warmup_epochs=getattr(config, 'LR_WARMUP_EPOCHS', 2),
                 total_epochs=total_epochs,
-                base_lr=0.001,
-                min_lr=1e-6
+                base_lr=getattr(config, 'LR_BASE', 6e-4),
+                min_lr=getattr(config, 'LR_MIN', 1e-6)
             ),
             
+            # EMA весов: стабильная валидация за счет EMA-параметров
+            EMAWeightsCallback(
+                decay=getattr(config, 'EMA_DECAY', 0.999),
+                use_for_validation=getattr(config, 'USE_EMA_VALIDATION', True)
+            ),
+
             # Early Stopping для предотвращения переобучения
             tf.keras.callbacks.EarlyStopping(
                 monitor='val_loss',
@@ -367,6 +536,57 @@ class XLSTMRLModel:
                 verbose=1
             )
         ]
+        
+        # Динамическое переназначение весов классов по эпохам (мягкий режим)
+        if getattr(config, 'DYNAMIC_CLASS_WEIGHTS', False):
+            class DynamicWeightsCallback(tf.keras.callbacks.Callback):
+                def __init__(self, step=0.05, target_ratios=None):
+                    super().__init__()
+                    self.step = step
+                    self.target = np.array(target_ratios or [0.3, 0.3, 0.4])
+                def on_epoch_end(self, epoch, logs=None):
+                    try:
+                        # Получаем распределение предсказаний на валидации
+                        vd = getattr(self.model, 'validation_data', None)
+                        if vd is None:
+                            return
+                        X_val, y_val = vd[:2]
+                        preds = self.model.predict(X_val, verbose=0)
+                        pred_labels = np.argmax(preds, axis=1)
+                        hist = np.bincount(pred_labels, minlength=3)
+                        total = max(1, len(pred_labels))
+                        dist = hist / total
+                        print(f"[DynWeights] pred BUY/HOLD/SELL: {dist[2]:.2%}/{dist[1]:.2%}/{dist[0]:.2%}")
+                        # 🔥 УЛУЧШЕНО: Агрессивная корректировка при сильном дисбалансе
+                        loss_obj = getattr(self.model, 'loss', None)
+                        if hasattr(loss_obj, 'per_class_alpha') and loss_obj.per_class_alpha is not None:
+                            alpha = np.array(loss_obj.per_class_alpha, dtype=np.float32)
+                            delta = dist - self.target
+                            
+                            # Увеличиваем шаг корректировки при сильном дисбалансе
+                            max_deviation = np.max(np.abs(delta))
+                            adaptive_step = self.step * (1.0 + 2.0 * max_deviation)  # До 3x больше при сильном дисбалансе
+                            
+                            # Корректируем веса с адаптивным шагом
+                            alpha[2] = float(np.clip(alpha[2] - adaptive_step * np.sign(delta[2]), 0.1, 3.0))
+                            alpha[0] = float(np.clip(alpha[0] - adaptive_step * np.sign(delta[0]), 0.1, 3.0))
+                            alpha[1] = float(np.clip(alpha[1] - adaptive_step * np.sign(delta[1]), 0.1, 3.0))
+                            loss_obj.per_class_alpha = alpha.tolist()
+                            print(f"[DynWeights] deviation={max_deviation:.3f}, step={adaptive_step:.3f}")
+                            print(f"[DynWeights] per_class_alpha -> {loss_obj.per_class_alpha}")
+                    except Exception as e:
+                        print(f"[DynWeights] skip adjust: {e}")
+            callbacks.append(DynamicWeightsCallback(
+                step=getattr(config, 'DYNAMIC_WEIGHT_STEP', 0.05),
+                target_ratios=getattr(config, 'TARGET_CLASS_RATIOS', [0.3, 0.3, 0.4])
+            ))
+        
+        # Добавляем трекер эпох для смешанного лосса CE→AFL, если он инициализирован при compile
+        try:
+            if hasattr(self, '_mixed_loss_callback') and self._mixed_loss_callback is not None:
+                callbacks.append(self._mixed_loss_callback)
+        except Exception as e:
+            print(f"[Callbacks] skip adding MixedLoss epoch tracker: {e}")
         
         return callbacks
 

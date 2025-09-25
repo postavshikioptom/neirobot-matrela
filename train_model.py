@@ -8,11 +8,12 @@ import tensorflow as tf
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 from datetime import datetime
-from sklearn.utils import class_weight # 🔥 ДОБАВЛЕНО: Импорт class_weight
+# from sklearn.utils import class_weight # 🔥 УДАЛЕНО: Больше не используем sample_weights
 import math
 import psutil  # 🔥 ДОБАВЛЕНО: Импорт psutil для проверки памяти
 import gc
 from collections import deque
+import itertools
 
 # Импорт для настройки устройств
 from device_config import DeviceConfig
@@ -24,7 +25,7 @@ has_gpu, num_gpus = DeviceConfig.setup()
 tf.config.run_functions_eagerly(False) # 🔥 ИСПРАВЛЕНО: Установите False или удалите
 
 # Импорт наших модулей
-from feature_engineering import FeatureEngineering
+from feature_engineering import FeatureEngineering, apply_smote_to_training_data
 from trading_env import TradingEnvironment
 from rl_agent import RLAgent
 from hybrid_decision_maker import HybridDecisionMaker
@@ -139,6 +140,10 @@ class ThreeStageTrainer:
         # 🔥 ДОБАВЛЕНО: Для RL-этапа будем хранить X для каждого символа отдельно
         X_data_for_rl = {} 
         
+        # Подготовим отображение символов в индексы для стратификации по символам
+        symbol_to_id = {s: idx for idx, s in enumerate(valid_symbols)}
+        all_symbol_ids = []  # выравнивается с all_X_supervised/all_y_supervised
+
         for i, symbol in enumerate(valid_symbols):
             symbol_data = df_filtered[df_filtered['symbol'] == symbol].copy()
             
@@ -155,12 +160,10 @@ class ThreeStageTrainer:
                     # и только трансформируем данные, затем генерируем метки
                     
                     # 🔥 КЛЮЧЕВОЕ ИЗМЕНЕНИЕ ЗДЕСЬ: Сначала добавляем индикаторы
-                    # Это гарантирует, что все колонки (базовые + индикаторы) существуют
-                    # перед тем, как мы пытаемся к ним обратиться или масштабировать
-                    symbol_data_with_indicators = self.feature_eng._add_technical_indicators(symbol_data.copy()) # 🔥 ДОБАВЛЕНО
+                    symbol_data_with_indicators = self.feature_eng._add_technical_indicators(symbol_data.copy())
                     
                     # Теперь преобразуем все колонки (включая индикаторы) в числовой формат
-                    temp_df_for_scaling = symbol_data_with_indicators.copy() # 🔥 ИЗМЕНЕНО: используем df с индикаторами
+                    temp_df_for_scaling = symbol_data_with_indicators.copy()
                     for col in self.feature_eng.feature_columns:
                         temp_df_for_scaling[col] = pd.to_numeric(temp_df_for_scaling[col], errors='coerce')
                     
@@ -170,12 +173,8 @@ class ThreeStageTrainer:
                     # Создаем последовательности из трансформированных данных
                     X_scaled_sequences, _ = self.feature_eng._create_sequences(scaled_data)
                     
-                    # Создаем метки на основе оригинальных цен
-                    # 🔥 ИЗМЕНЕНО: передаем original symbol_data, а не temp_df_for_scaling
-                    # Используем адаптивный порог для создания меток
-                    labels = self.feature_eng.create_trading_labels(
-                        symbol_data  # 🔥 ИЗМЕНЕНО: Используем оригинальный df для меток
-                    )
+                    # Создаем метки на основе оригинальных цен (адаптивный порог)
+                    labels = self.feature_eng.create_trading_labels(symbol_data)
                     
                     # Обрезаем до минимальной длины
                     min_len = min(len(X_scaled_sequences), len(labels))
@@ -183,21 +182,23 @@ class ThreeStageTrainer:
                     labels = labels[:min_len]
                 
                 if len(X_scaled_sequences) > 0:
-                    all_X_supervised.append(X_scaled_sequences) # 🔥 ИЗМЕНЕНО
-                    all_y_supervised.append(labels)           # 🔥 ИЗМЕНЕНО
+                    all_X_supervised.append(X_scaled_sequences)
+                    all_y_supervised.append(labels)
                     
-                    X_data_for_rl[symbol] = X_scaled_sequences # 🔥 ДОБАВЛЕНО: Сохраняем для RL
+                    # Символьные ID для каждой последовательности этого символа
+                    all_symbol_ids.append(np.full(shape=(len(X_scaled_sequences),), fill_value=symbol_to_id[symbol], dtype=np.int32))
                     
-                    # Вывод распределения меток
+                    X_data_for_rl[symbol] = X_scaled_sequences  # для RL
+                    
+                    # Вывод распределения меток (опционально)
                     try:
                         if labels is not None and len(labels) > 0:
                             u, c = np.unique(labels, return_counts=True)
                             dist = {int(k): int(v) for k, v in zip(u, c)}
-                            print(f"[SYMBOL DEBUG] {symbol} labels distribution: {dist} (threshold=adaptive)")
                         else:
-                            print(f"[SYMBOL DEBUG] {symbol} produced no labels")
-                    except Exception as e:
-                        print(f"[SYMBOL DEBUG] error computing dist for {symbol}: {e}")
+                            pass
+                    except Exception:
+                        pass
                     
             except Exception as e:
                 print(f"❌ Ошибка при обработке символа {symbol}: {e}")
@@ -209,6 +210,8 @@ class ThreeStageTrainer:
         if all_X_supervised and all_y_supervised:
             X_supervised = np.vstack(all_X_supervised)
             y_supervised = np.concatenate(all_y_supervised)
+            # Выровняем и символы
+            symbol_ids = np.concatenate(all_symbol_ids) if all_symbol_ids else np.zeros((len(y_supervised),), dtype=np.int32)
             
             # Анализ глобального распределения меток
             u, c = np.unique(y_supervised, return_counts=True)
@@ -224,8 +227,6 @@ class ThreeStageTrainer:
             
             print(f"Итого подготовлено для Supervised: X={X_supervised.shape}, y={y_supervised.shape}")
             print(f"Распределение классов: SELL={np.sum(y_supervised==0)}, HOLD={np.sum(y_supervised==1)}, BUY={np.sum(y_supervised==2)}")
-            
-            # Остальной код без изменений...
         else:
             print("❌ Нет данных для обучения. Проверьте обработку символов выше.")
             return False
@@ -252,71 +253,63 @@ class ThreeStageTrainer:
             print("Нет данных для анализа")
         
         def augment_sequences_batched(X, y, factor=2, max_memory_gb=4.0):
-            """🔥 ИСПРАВЛЕНО: Батчевая аугментация с контролем памяти"""
+            """Лёгкие аугментации с контролем памяти и опциями из config"""
+            if not getattr(config, 'USE_AUGMENTATIONS', True):
+                return X, y
             if len(X) == 0:
                 return X, y
             
-            # Перед циклом: get total and threshold once
-            total_memory_gb = psutil.virtual_memory().total / (1024**3)
-            # inside loop, replace current_memory_gb calculation with:
-            used_memory_gb = (psutil.virtual_memory().total - psutil.virtual_memory().available) / (1024**3)
+            noise_std = float(getattr(config, 'AUG_NOISE_STD', 0.01))
+            max_shift = int(getattr(config, 'AUG_TIME_SHIFT', 1))
+            mask_prob = float(getattr(config, 'AUG_MASK_PROB', 0.05))
+            mask_max_t = int(getattr(config, 'AUG_MASK_MAX_T', 2))
+            
             available_memory_gb = psutil.virtual_memory().available / (1024**3)
-            # Then the check:
-            if available_memory_gb < (max_memory_gb * 0.2):  # stop if available < 20% of configured limit
+            if available_memory_gb < (max_memory_gb * 0.2):
                 print(f"⚠️ Достигнут лимит памяти: available={available_memory_gb:.2f}GB, required buffer={max_memory_gb*0.2:.2f}GB")
                 return X, y
             
-            # Также уменьшите начальный batch_size выбор разумнее (не min(1000, len(X)//10) — это могло дать 1000). Пример:
             batch_size = min(500, max(64, len(X)//50))
-            print(f"Начинаем батчевую аугментацию с размером батча {batch_size}")
-            
-            augmented_X = deque()  # Используем deque для эффективного добавления
+            augmented_X = deque()
             augmented_y = deque()
-            
-            print(f"Начинаем батчевую аугментацию с размером батча {batch_size}")
             
             for start_idx in range(0, len(X), batch_size):
                 end_idx = min(start_idx + batch_size, len(X))
                 batch_X = X[start_idx:end_idx]
                 batch_y = y[start_idx:end_idx]
-                
-                # Добавляем оригинальные данные
                 augmented_X.extend(batch_X)
                 augmented_y.extend(batch_y)
                 
-                # Проверяем память перед аугментацией батча
-                used_memory_gb = (psutil.virtual_memory().total - psutil.virtual_memory().available) / (1024**3)
                 available_memory_gb = psutil.virtual_memory().available / (1024**3)
-                # Then the check:
-                if available_memory_gb < (max_memory_gb * 0.2):  # stop if available < 20% of configured limit
+                if available_memory_gb < (max_memory_gb * 0.2):
                     print(f"⚠️ Достигнут лимит памяти: available={available_memory_gb:.2f}GB, required buffer={max_memory_gb*0.2:.2f}GB")
                     break
                 
-                # Аугментируем батч
                 for i in range(len(batch_X)):
-                    try:
-                        noise = np.random.normal(0, 0.05 * np.std(batch_X[i]), batch_X[i].shape)
-                        augmented_X.append(batch_X[i] + noise)
-                        augmented_y.append(batch_y[i])
-                    except MemoryError:
-                        print("⚠️ MemoryError при аугментации, останавливаем")
-                        break
+                    x = batch_X[i].copy()
+                    # 1) Небольшой временной сдвиг
+                    if max_shift > 0 and x.shape[0] > 2:
+                        shift = np.random.randint(-max_shift, max_shift+1)
+                        if shift != 0:
+                            x = np.roll(x, shift, axis=0)
+                    # 2) Лёгкий гауссов шум
+                    if noise_std > 0:
+                        x = x + np.random.normal(0, noise_std, size=x.shape)
+                    # 3) Крошечная временная маска
+                    if np.random.rand() < mask_prob and x.shape[0] > 3:
+                        t = np.random.randint(1, min(mask_max_t, x.shape[0]//4) + 1)
+                        s = np.random.randint(0, x.shape[0]-t+1)
+                        x[s:s+t, :] = 0.0
+                    augmented_X.append(x)
+                    augmented_y.append(batch_y[i])
                 
-                # 🔥 ДОБАВЛЕНО: Принудительная очистка каждый батч
-                if start_idx % (batch_size * 5) == 0:  # Каждые 5 батчей
+                if start_idx % (batch_size * 5) == 0:
                     gc.collect()
-                    print(f"Обработано {end_idx}/{len(X)} образцов, очистка памяти")
             
-            # Финальная очистка и конвертация
             gc.collect()
             result_X = np.array(list(augmented_X))
             result_y = np.array(list(augmented_y))
-            
-            # Очищаем deque
-            augmented_X.clear()
-            augmented_y.clear()
-            gc.collect()
-            
+            augmented_X.clear(); augmented_y.clear(); gc.collect()
             print(f"Аугментация завершена: {len(X)} -> {len(result_X)} образцов")
             return result_X, result_y
         
@@ -352,7 +345,48 @@ class ThreeStageTrainer:
             )
         
         print(f"Размеры выборок (Supervised): Train={len(self.X_train_supervised)}, Val={len(self.X_val_supervised)}, Test={len(self.X_test_supervised)}") # 🔥 ИЗМЕНЕНО
-        
+
+        # 🔥 ДОБАВЛЕНО: Применяем SMOTE для балансировки классов в тренировочных данных
+        if config.USE_SMOTE:
+            print("🔄 Применяем SMOTE для балансировки тренировочных данных...")
+            try:
+                if getattr(config, 'USE_CHUNKED_SMOTE', False):
+                    from feature_engineering import apply_chunked_smote
+                    self.X_train_supervised, self.y_train_supervised = apply_chunked_smote(
+                        self.X_train_supervised,
+                        self.y_train_supervised,
+                        minority_classes=tuple(getattr(config, 'CHUNKED_SMOTE_MINORITY_CLASSES', [0,1])),
+                        max_synth_per_class=getattr(config, 'CHUNKED_SMOTE_MAX_SYNTH_PER_CLASS', 15000),
+                        memory_guard_gb=1.5,
+                        chunk_size=2000,
+                        verbose=True
+                    )
+                else:
+                    # Целевое распределение: SELL=30%, HOLD=40%, BUY=30% (чтобы не переусилить minority классы)
+                    target_distribution = {0: 30.0, 1: 40.0, 2: 30.0}
+                    self.X_train_supervised, self.y_train_supervised = apply_smote_to_training_data(
+                        self.X_train_supervised, self.y_train_supervised, target_distribution
+                    )
+                print(f"✅ SMOTE завершен успешно!")
+                print(f"📊 После SMOTE: Train={len(self.X_train_supervised)}, Val={len(self.X_val_supervised)}, Test={len(self.X_test_supervised)}")
+                
+                # Проверяем финальное распределение классов
+                unique, counts = np.unique(self.y_train_supervised, return_counts=True)
+                total = len(self.y_train_supervised)
+                print("📊 Финальное распределение тренировочных классов после SMOTE:")
+                for cls, count in zip(unique, counts):
+                    percentage = count / total * 100
+                    print(f"   Класс {cls}: {percentage:.2f}% ({count} образцов)")
+                    
+            except Exception as e:
+                print(f"❌ ОШИБКА при применении SMOTE: {e}")
+                import traceback
+                traceback.print_exc()
+                print("🔄 Продолжаем без SMOTE...")
+        else:
+            print("⚠️ SMOTE отключен в конфигурации")
+
+        print("🔄 Переходим к подготовке RL данных...")
         # 🔥 ДОБАВЛЕНО: Разделяем данные для RL-обучения по символам
         for symbol, data_sequences in X_data_for_rl.items():
             # Делим каждую последовательность на тренировочную и валидационную для RL
@@ -366,17 +400,24 @@ class ThreeStageTrainer:
             print(f"RL данные для {symbol}: Train={len(self.X_rl_train_by_symbol[symbol])}, Val={len(self.X_rl_val_by_symbol[symbol])}")
             
         # Сохраняем скейлер
+        print("🔄 Сохраняем скейлер...")
         self.feature_eng.save_scaler()
+        print("✅ Скейлер сохранен")
         
         # Инициализируем модель
+        print("🔄 Инициализируем модель...")
         # 🔥 ИЗМЕНЕНО: input_shape теперь использует длину feature_columns из feature_eng
         input_shape = (config.SEQUENCE_LENGTH, len(self.feature_eng.feature_columns)) 
+        print(f"📊 Размер входных данных для модели: {input_shape}")
+        
         self.model = XLSTMRLModel(
             input_shape=input_shape,
             memory_size=config.XLSTM_MEMORY_SIZE,
             memory_units=config.XLSTM_MEMORY_UNITS
         )
+        print("✅ Модель инициализирована успешно")
         
+        print("🎉 === ПОДГОТОВКА ДАННЫХ ЗАВЕРШЕНА УСПЕШНО ===")
         return True
     
     def stage1_supervised_pretraining(self):
@@ -400,49 +441,292 @@ class ThreeStageTrainer:
         batch_size = self._get_optimal_batch_size()
         print(f"Используем размер батча: {batch_size}")
         
-        # Более агрессивные веса для редких классов
-        # 🔥 ИСПРАВЛЕНО: Проверка на наличие уникальных классов перед расчетом class_weight
-        unique_classes = np.unique(self.y_train_supervised)
-        if len(unique_classes) > 1:
-            class_weights_dict = class_weight.compute_class_weight(
-                'balanced',
-                classes=unique_classes,
-                y=self.y_train_supervised
-            )
-            # Дополнительно увеличиваем вес для BUY (самый редкий)
-            # Преобразуем словарь в массив для sample_weight
-            sample_weights_base = np.array([class_weights_dict[label] for label in self.y_train_supervised], dtype=np.float32)
-            
-            # 🔥 ДОБАВЛЕНО: Увеличиваем вес для BUY в sample_weights_base
-            # Предполагаем, что BUY класс - это 2
-            buy_class_index = 2
-            sample_weights_base[self.y_train_supervised == buy_class_index] *= 1.5
-            
-            print(f"DEBUG: sample_weights_base min={np.min(sample_weights_base):.4f}, max={np.max(sample_weights_base):.4f}, mean={np.mean(sample_weights_base):.4f}")
-            print(f"Скорректированные веса классов (используются для sample_weight): {class_weights_dict}") # Логируем dict для информации
-        else:
-            print("⚠️ Недостаточно уникальных классов для расчета sample_weight. Используем None.")
-            sample_weights_base = None # Если только один класс, веса не нужны
+        # 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Отключаем sample_weights, полагаемся только на AFL параметры
+        # Проблема: sample_weights конфликтовали с AFL_ALPHA, создавая непредсказуемое поведение
+        # Решение: Используем только AFL (Asymmetric Focal Loss) для контроля баланса классов
+        print("🎯 Sample weights отключены - используем только AFL параметры из config для балансировки")
+        sample_weights_base = None  # Принудительно отключаем автоматические веса
 
         # 🔥 ИСПРАВЛЕНО: Явное преобразование меток
         y_train_processed = np.array(self.y_train_supervised, dtype=np.int32)
         y_val_processed = np.array(self.y_val_supervised, dtype=np.int32)
         
 
+        # Готовим данные для class-balanced batching, если включено
+        train_X = self.X_train_supervised
+        train_y = y_train_processed
+        val_X = self.X_val_supervised
+        val_y = y_val_processed
+
+        if getattr(config, 'CLASS_BALANCED_BATCHING', False):
+            print("🔄 Включен class-balanced batching по TARGET_CLASS_RATIOS")
+            import math
+            ratios = getattr(config, 'TARGET_CLASS_RATIOS', [0.3, 0.3, 0.4])
+
+            # Разбиваем индексы по классам
+            idx_sell = np.where(train_y == 0)[0]
+            idx_hold = np.where(train_y == 1)[0]
+            idx_buy  = np.where(train_y == 2)[0]
+            rng = np.random.default_rng(42)
+
+            # Подготовим индексы по символам для стратификации
+            symbol_ids_train = symbol_ids[:len(train_y)] if 'symbol_ids' in locals() else np.zeros_like(train_y)
+            symbol_to_indices = {}
+            if getattr(config, 'SYMBOL_STRATIFIED_BATCHING', False):
+                for sid in np.unique(symbol_ids_train):
+                    symbol_to_indices[int(sid)] = np.where(symbol_ids_train == sid)[0]
+                # Желаем распределить символы равномерно
+                uniq_sids = list(symbol_to_indices.keys())
+                sid_cycle = itertools.cycle(uniq_sids) if len(uniq_sids) > 0 else None
+
+            # Hard Negative Mining (предварительный расчет трудных примеров для SELL/HOLD)
+            hard_sell = None
+            hard_hold = None
+            if getattr(config, 'USE_HARD_NEGATIVE_MINING', False):
+                try:
+                    print("🔎 Подготовка hard negatives по loss")
+                    probs = self.model.actor_model.predict(train_X, verbose=0)
+                    true_prob = np.clip(probs[np.arange(len(train_y)), train_y], 1e-9, 1.0)
+                    losses = -np.log(true_prob)
+                    frac = float(getattr(config, 'HNM_TOP_K_FRACTION', 0.05))
+                    k_sell = max(1, int(len(idx_sell) * frac)) if len(idx_sell) > 0 else 0
+                    k_hold = max(1, int(len(idx_hold) * frac)) if len(idx_hold) > 0 else 0
+                    if k_sell > 0:
+                        hard_sell = idx_sell[np.argsort(losses[idx_sell])[-k_sell:]]
+                    if k_hold > 0:
+                        hard_hold = idx_hold[np.argsort(losses[idx_hold])[-k_hold:]]
+                    print(f"✅ HNM: SELL hard={0 if hard_sell is None else len(hard_sell)}, HOLD hard={0 if hard_hold is None else len(hard_hold)}")
+                except Exception as e:
+                    print(f"⚠️ HNM отключен: {e}")
+                    hard_sell, hard_hold = None, None
+
+            def balanced_batch_generator(X, y, batch_size):
+                q = (np.array(ratios) / np.sum(ratios)).astype(float)
+                per_class = np.maximum(1, (q * batch_size).astype(int))
+                # Корректируем сумму
+                diff = batch_size - per_class.sum()
+                if diff != 0:
+                    per_class[np.argmax(q)] += diff
+                pools = [idx_sell.copy(), idx_hold.copy(), idx_buy.copy()]
+
+                # Планирование доли hard-negative внутри батча
+                hard_start = float(getattr(config, 'HNM_HARD_SAMPLE_START', 0.20))
+                hard_end = float(getattr(config, 'HNM_HARD_SAMPLE_END', 0.50))
+                warm_epochs = max(1, int(getattr(config, 'AFL_WARMUP_EPOCHS', 5)))
+                update_period = max(1, int(getattr(config, 'HNM_UPDATE_PERIOD', 5)))
+
+                current_epoch = 0
+                last_update_epoch = -1
+
+                # Подсчитываем батчи и обновляем hard-пулы только по завершении "эпохи" генератора
+                steps_per_epoch_local = max(1, math.ceil(len(y) / max(1, batch_size)))
+                batch_counter = 0
+
+                while True:
+                    # Линейная интерполяция hnm_ratio в первые warm_epochs
+                    t = min(1.0, current_epoch / float(warm_epochs))
+                    hnm_ratio = hard_start * (1.0 - t) + hard_end * t
+
+                    # Обновление hard-пулов не чаще, чем раз в update_period ЭПОХ (а не каждые N батчей)
+                    if (getattr(config, 'USE_HARD_NEGATIVE_MINING', False)
+                        and (batch_counter % steps_per_epoch_local == 0)
+                        and (current_epoch - last_update_epoch >= update_period)):
+                        try:
+                            probs = self.model.actor_model.predict(X, verbose=0)
+                            true_prob = np.clip(probs[np.arange(len(y)), y], 1e-9, 1.0)
+                            losses = -np.log(true_prob)
+                            frac = float(getattr(config, 'HNM_TOP_K_FRACTION', 0.05))
+                            if len(idx_sell) > 0:
+                                k_sell = max(1, int(len(idx_sell) * frac))
+                                nonlocal hard_sell
+                                hard_sell = idx_sell[np.argsort(losses[idx_sell])[-k_sell:]]
+                            if len(idx_hold) > 0:
+                                k_hold = max(1, int(len(idx_hold) * frac))
+                                nonlocal hard_hold
+                                hard_hold = idx_hold[np.argsort(losses[idx_hold])[-k_hold:]]
+                            last_update_epoch = current_epoch
+                        except Exception as e:
+                            print(f"⚠️ HNM update skipped: {e}")
+
+                    batch_idx = []
+                    if getattr(config, 'SYMBOL_STRATIFIED_BATCHING', False) and 'sid_cycle' in locals() and sid_cycle is not None:
+                        # Стратификация по символам: набираем мини-группы по символам
+                        # Простейшая схема: равные доли символов на батч
+                        uniq_sids = list(symbol_to_indices.keys())
+                        per_symbol = max(1, batch_size // max(1, len(uniq_sids)))
+                        chosen_indices = []
+                        for _ in range(max(1, len(uniq_sids))):
+                            sid = next(sid_cycle)
+                            sid_pool = symbol_to_indices.get(int(sid), np.arange(len(y)))
+                            if len(sid_pool) == 0:
+                                continue
+                            # внутри символа — соблюдаем классовые доли
+                            sid_sel = []
+                            for cls, need in enumerate(per_class):
+                                pool = np.intersect1d(pools[cls], sid_pool, assume_unique=False)
+                                if len(pool) == 0:
+                                    continue
+                                take = max(1, int(round(need * (per_symbol / float(batch_size)))))
+                                take = min(take, len(pool))
+                                sid_sel.append(rng.choice(pool, size=take, replace=False))
+                            if sid_sel:
+                                chosen_indices.append(np.concatenate(sid_sel))
+                        if chosen_indices:
+                            batch_idx = np.concatenate(chosen_indices)
+                        else:
+                            # fallback: стандартный набор без символьной стратификации
+                            for cls, need in enumerate(per_class):
+                                pool = pools[cls]
+                                if len(pool) < need:
+                                    chosen_pool = pool if len(pool) > 0 else np.arange(len(y))
+                                    chosen = rng.choice(chosen_pool, size=need, replace=True)
+                                else:
+                                    hard_pool = hard_sell if cls == 0 else (hard_hold if cls == 1 else None)
+                                    if hard_pool is not None and len(hard_pool) > 0:
+                                        h = max(1, int(round(need * hnm_ratio)))
+                                        h = min(h, len(hard_pool))
+                                        h_idx = rng.choice(hard_pool, size=h, replace=False)
+                                        rest = need - h
+                                        rest_idx = rng.choice(pool, size=rest, replace=False)
+                                        chosen = np.concatenate([h_idx, rest_idx])
+                                    else:
+                                        chosen = rng.choice(pool, size=need, replace=False)
+                                batch_idx.append(chosen)
+                            batch_idx = np.concatenate(batch_idx)
+                    else:
+                        # Обычный класс-стратифицированный отбор
+                        for cls, need in enumerate(per_class):
+                            pool = pools[cls]
+                            if len(pool) < need:
+                                # ресемпл с возвратом
+                                chosen_pool = pool if len(pool) > 0 else np.arange(len(y))
+                                chosen = rng.choice(chosen_pool, size=need, replace=True)
+                            else:
+                                # часть примеров берем из hard-пула, если доступен и класс SELL/HOLD
+                                hard_pool = hard_sell if cls == 0 else (hard_hold if cls == 1 else None)
+                                if hard_pool is not None and len(hard_pool) > 0:
+                                    h = max(1, int(round(need * hnm_ratio)))
+                                    h = min(h, len(hard_pool))
+                                    h_idx = rng.choice(hard_pool, size=h, replace=False)
+                                    rest = need - h
+                                    rest_idx = rng.choice(pool, size=rest, replace=False)
+                                    chosen = np.concatenate([h_idx, rest_idx])
+                                else:
+                                    chosen = rng.choice(pool, size=need, replace=False)
+                            batch_idx.append(chosen)
+                        batch_idx = np.concatenate(batch_idx)
+
+                    rng.shuffle(batch_idx)
+
+                    # Считаем батчи и обновляем счетчик эпох только после steps_per_epoch_local батчей
+                    batch_counter += 1
+                    if batch_counter % steps_per_epoch_local == 0:
+                        current_epoch += 1
+
+                    yield X[batch_idx], y[batch_idx]
+
+            steps_per_epoch = math.ceil(len(train_X) / batch_size)
+            train_data = balanced_batch_generator(train_X, train_y, batch_size)
+            validation_data = (val_X, val_y)
+            fit_kwargs = dict(x=train_data, steps_per_epoch=steps_per_epoch, validation_data=validation_data)
+            sample_weight_arg = None
+        else:
+            fit_kwargs = dict(x=train_X, y=train_y, validation_data=(val_X, val_y), batch_size=batch_size)
+            sample_weight_arg = sample_weights_base
+
         history = self.model.actor_model.fit(
-            self.X_train_supervised, y_train_processed, # 🔥 ИЗМЕНЕНО
-            validation_data=(self.X_val_supervised, y_val_processed), # 🔥 ИЗМЕНЕНО
             epochs=config.SUPERVISED_EPOCHS,
-            batch_size=batch_size,
             callbacks=callbacks,
             verbose=1,
-            sample_weight=sample_weights_base
+            sample_weight=sample_weight_arg,
+            **fit_kwargs
         )
         
         print("=== РЕЗУЛЬТАТЫ SUPERVISED ОБУЧЕНИЯ ===")
         
-        y_pred_probs = self.model.actor_model.predict(self.X_test_supervised, verbose=0) # 🔥 ИЗМЕНЕНО
-        y_pred = np.argmax(y_pred_probs, axis=1)
+        # === Валидация с TTA и калибровкой температуры ===
+        def _moving_average_3(x):
+            # Применяем простое сглаживание вдоль оси времени
+            # x: (n, T, F)
+            if x.shape[1] < 3:
+                return x
+            x_pad = np.pad(x, ((0,0),(1,1),(0,0)), mode='edge')
+            return (x_pad[:, :-2, :] + 2*x_pad[:, 1:-1, :] + x_pad[:, 2:, :]) / 4.0
+        
+        def _zscore_window(x):
+            # Нормализация по каждому образцу (по времени и фичам), без утечки между сэмплами
+            mean = x.mean(axis=(1,2), keepdims=True) if x.ndim==3 else x.mean(axis=0, keepdims=True)
+            std = x.std(axis=(1,2), keepdims=True) + 1e-6 if x.ndim==3 else x.std(axis=0, keepdims=True) + 1e-6
+            return (x - mean) / std
+        
+        # Предсказания на валидации (для подбора температуры)
+        val_probs = self.model.actor_model.predict(val_X, verbose=0)
+        if getattr(config, 'USE_TTA_VALIDATION', False):
+            print("🔄 Выполняем TTA на валидации")
+            tta_list = getattr(config, 'TTA_TRANSFORMS', ['identity'])
+            prob_stack = [val_probs]
+            for t in tta_list:
+                if t == 'identity':
+                    continue
+                elif t == 'zscore_window':
+                    X_t = _zscore_window(val_X)
+                elif t == 'gaussian_smooth':
+                    X_t = _moving_average_3(val_X)
+                else:
+                    continue
+                prob_stack.append(self.model.actor_model.predict(X_t, verbose=0))
+            val_probs = np.mean(prob_stack, axis=0)
+        
+        # Температурная калибровка (подбор T по NLL на валидации)
+        best_T = 1.0
+        if getattr(config, 'USE_TEMPERATURE_SCALING', False):
+            print("🔧 Подбираем температуру по валидации")
+            def softmax_logits_scaled(probs, T):
+                logits = np.log(np.clip(probs, 1e-7, 1-1e-7))
+                z = logits / T
+                z = z - z.max(axis=1, keepdims=True)
+                ez = np.exp(z)
+                return ez / ez.sum(axis=1, keepdims=True)
+            def nll(probs, y):
+                p = np.clip(probs[np.arange(len(y)), y], 1e-7, 1-1e-7)
+                return -np.mean(np.log(p))
+            grid = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+            best_val = float('inf')
+            for T in grid:
+                scaled = softmax_logits_scaled(val_probs, T)
+                loss = nll(scaled, val_y)
+                if loss < best_val:
+                    best_val = loss
+                    best_T = T
+            print(f"✅ Лучшая температура: T={best_T}")
+        
+        # Предсказания на тесте + TTA + применение температуры
+        test_probs = self.model.actor_model.predict(self.X_test_supervised, verbose=0)
+        # Опционально TTA на тесте (используем тот же список трансформаций, что и для валидации)
+        if getattr(config, 'USE_TTA_VALIDATION', False):  # при необходимости можно ввести отдельный флаг USE_TTA_TEST
+            prob_stack_test = [test_probs]
+            tta_list = getattr(config, 'TTA_TRANSFORMS', ['identity'])
+            for t in tta_list:
+                if t == 'identity':
+                    continue
+                elif t == 'zscore_window':
+                    X_t = _zscore_window(self.X_test_supervised)
+                elif t == 'gaussian_smooth':
+                    X_t = _moving_average_3(self.X_test_supervised)
+                else:
+                    continue
+                prob_stack_test.append(self.model.actor_model.predict(X_t, verbose=0))
+            test_probs = np.mean(prob_stack_test, axis=0)
+        
+        # Затем применяем температурное масштабирование
+        if getattr(config, 'USE_TEMPERATURE_SCALING', False) and best_T != 1.0:
+            logits = np.log(np.clip(test_probs, 1e-7, 1-1e-7))
+            z = logits / best_T
+            z = z - z.max(axis=1, keepdims=True)
+            ez = np.exp(z)
+            test_probs = ez / ez.sum(axis=1, keepdims=True)
+        
+        y_pred = np.argmax(test_probs, axis=1)
         
         accuracy = accuracy_score(self.y_test_supervised, y_pred) # 🔥 ИЗМЕНЕНО
         print(f"Точность на тестовой выборке: {accuracy:.4f}")
@@ -712,36 +996,69 @@ class ThreeStageTrainer:
         """Запускает полное трёхэтапное обучение"""
         print("🚀 ЗАПУСК ТРЁХЭТАПНОГО ОБУЧЕНИЯ xLSTM + RL") # 🔥 ИЗМЕНЕНО: logger.info -> print
         
-        # Подготовка данных
-        if not self.load_and_prepare_data():
-            print("Ошибка при подготовке данных") # 🔥 ИЗМЕНЕНО: logger.error -> print
+        try:
+            # Подготовка данных
+            print("🔄 Этап: Подготовка данных...")
+            if not self.load_and_prepare_data():
+                print("❌ Ошибка при подготовке данных") # 🔥 ИЗМЕНЕНО: logger.error -> print
+                return None
+            print("✅ Подготовка данных завершена успешно")
+            
+            results = {}
+            
+            # Этап 1: Supervised Pre-training
+            print("🔄 Этап 1: Supervised Pre-training...")
+            try:
+                supervised_results = self.stage1_supervised_pretraining()
+                if supervised_results is None:
+                    print("❌ Ошибка на этапе supervised pre-training") # 🔥 ИЗМЕНЕНО: logger.error -> print
+                    return None
+                results['supervised'] = supervised_results
+                print("✅ Этап 1 завершен успешно")
+            except Exception as e:
+                print(f"❌ КРИТИЧЕСКАЯ ОШИБКА на этапе 1 (Supervised): {e}")
+                import traceback
+                traceback.print_exc()
+                return None
+            
+            # Этап 2: Reward Model Training
+            print("🔄 Этап 2: Reward Model Training...")
+            try:
+                reward_results = self.stage2_reward_model_training()
+                if reward_results is None:
+                    print("❌ Ошибка на этапе reward model training") # 🔥 ИЗМЕНЕНО: logger.error -> print
+                    return None
+                results['reward_model'] = reward_results
+                print("✅ Этап 2 завершен успешно")
+            except Exception as e:
+                print(f"❌ КРИТИЧЕСКАЯ ОШИБКА на этапе 2 (Reward Model): {e}")
+                import traceback
+                traceback.print_exc()
+                return None
+            
+            # Этап 3: RL Fine-tuning
+            print("🔄 Этап 3: RL Fine-tuning...")
+            try:
+                rl_results = self.stage3_rl_finetuning()
+                if rl_results is None:
+                    print("❌ Ошибка на этапе RL fine-tuning") # 🔥 ИЗМЕНЕНО: logger.error -> print
+                    return None
+                results['rl_finetuning'] = rl_results
+                print("✅ Этап 3 завершен успешно")
+            except Exception as e:
+                print(f"❌ КРИТИЧЕСКАЯ ОШИБКА на этапе 3 (RL Fine-tuning): {e}")
+                import traceback
+                traceback.print_exc()
+                return None
+            
+            print("✅ ТРЁХЭТАПНОЕ ОБУЧЕНИЕ ЗАВЕРШЕНО УСПЕШНО!") # 🔥 ИЗМЕНЕНО: logger.info -> print
+            return results
+            
+        except Exception as e:
+            print(f"❌ КРИТИЧЕСКАЯ ОШИБКА в run_full_training: {e}")
+            import traceback
+            traceback.print_exc()
             return None
-        
-        results = {}
-        
-        # Этап 1: Supervised Pre-training
-        supervised_results = self.stage1_supervised_pretraining()
-        if supervised_results is None:
-            print("Ошибка на этапе supervised pre-training") # 🔥 ИЗМЕНЕНО: logger.error -> print
-            return None
-        results['supervised'] = supervised_results
-        
-        # Этап 2: Reward Model Training
-        reward_results = self.stage2_reward_model_training()
-        if reward_results is None:
-            print("Ошибка на этапе reward model training") # 🔥 ИЗМЕНЕНО: logger.error -> print
-            return None
-        results['reward_model'] = reward_results
-        
-        # Этап 3: RL Fine-tuning
-        rl_results = self.stage3_rl_finetuning()
-        if rl_results is None:
-            print("Ошибка на этапе RL fine-tuning") # 🔥 ИЗМЕНЕНО: logger.error -> print
-            return None
-        results['rl_finetuning'] = rl_results
-        
-        print("✅ ТРЁХЭТАПНОЕ ОБУЧЕНИЕ ЗАВЕРШЕНО УСПЕШНО!") # 🔥 ИЗМЕНЕНО: logger.info -> print
-        return results
 
 def main():
     """Основная функция"""
