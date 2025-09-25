@@ -918,36 +918,61 @@ class ThreeStageTrainer:
         return np.array(rewards)
     
     def _plot_training_history(self, history, stage_name):
-        """Визуализирует историю обучения"""
+        """Визуализирует историю обучения с безопасным доступом к ключам history"""
         fig, axes = plt.subplots(1, 2, figsize=(15, 5))
-        
-        # Потери
-        axes[0].plot(history.history['loss'], label='Training Loss')
-        if 'val_loss' in history.history:
-            axes[0].plot(history.history['val_loss'], label='Validation Loss')
-        axes[0].set_title(f'{stage_name.capitalize()} Training Loss')
-        axes[0].set_xlabel('Epoch')
-        axes[0].set_ylabel('Loss')
-        axes[0].legend()
-        
-        # Метрики
-        if 'accuracy' in history.history:
-            axes[1].plot(history.history['accuracy'], label='Training Accuracy')
-            if 'val_accuracy' in history.history:
-                axes[1].plot(history.history['val_accuracy'], label='Validation Accuracy')
+
+        # Безопасный доступ к словарю истории
+        hist = getattr(history, 'history', {}) or {}
+        available_keys = set(hist.keys())
+
+        # Потери: ищем первый доступный ключ
+        loss_candidates = ['loss', 'total_loss', 'train_loss', 'training_loss', 'supervised_loss']
+        loss_key = next((k for k in loss_candidates if k in available_keys), None)
+        val_loss_key = 'val_loss' if 'val_loss' in available_keys else None
+
+        if loss_key:
+            axes[0].plot(hist[loss_key], label=f'{loss_key}')
+            if val_loss_key:
+                axes[0].plot(hist[val_loss_key], label=f'{val_loss_key}')
+            axes[0].set_title(f'{stage_name.capitalize()} Training Loss')
+            axes[0].set_xlabel('Epoch')
+            axes[0].set_ylabel('Loss')
+            axes[0].legend()
+        elif val_loss_key:
+            # Если есть только валидационные потери
+            axes[0].plot(hist[val_loss_key], label=f'{val_loss_key}')
+            axes[0].set_title(f'{stage_name.capitalize()} Validation Loss')
+            axes[0].set_xlabel('Epoch')
+            axes[0].set_ylabel('Loss')
+            axes[0].legend()
+        else:
+            # Нет данных по loss — не падаем, а сообщаем
+            axes[0].text(0.5, 0.5, 'Loss data not available',
+                         ha='center', va='center', transform=axes[0].transAxes)
+            axes[0].set_title(f'{stage_name.capitalize()} - No Loss Data')
+
+        # Метрики: сохраняем исходную логику, используем безопасный словарь
+        if 'accuracy' in available_keys:
+            axes[1].plot(hist['accuracy'], label='Training Accuracy')
+            if 'val_accuracy' in available_keys:
+                axes[1].plot(hist['val_accuracy'], label='Validation Accuracy')
             axes[1].set_title(f'{stage_name.capitalize()} Accuracy')
             axes[1].set_xlabel('Epoch')
             axes[1].set_ylabel('Accuracy')
             axes[1].legend()
-        elif 'mae' in history.history:
-            axes[1].plot(history.history['mae'], label='Training MAE')
-            if 'val_mae' in history.history:
-                axes[1].plot(history.history['val_mae'], label='Validation MAE')
+        elif 'mae' in available_keys:
+            axes[1].plot(hist['mae'], label='Training MAE')
+            if 'val_mae' in available_keys:
+                axes[1].plot(hist['val_mae'], label='Validation MAE')
             axes[1].set_title(f'{stage_name.capitalize()} MAE')
             axes[1].set_xlabel('Epoch')
             axes[1].set_ylabel('MAE')
             axes[1].legend()
-        
+        else:
+            axes[1].text(0.5, 0.5, 'Metric data not available',
+                         ha='center', va='center', transform=axes[1].transAxes)
+            axes[1].set_title(f'{stage_name.capitalize()} - No Metric Data')
+
         plt.tight_layout()
         plt.savefig(f'plots/{stage_name}_training_history.png')
         plt.close()
